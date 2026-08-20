@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="10.0.1">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -20,6 +24,7 @@
     <!-- Override Microsoft.Data.Sqlite's transitive SQLitePCLRaw (2.1.11, flagged by GHSA-2m69-gcr7-jv3q)
          with the patched 3.x native bundle. -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
     <PackageReference Include="Moq" Version="4.20.72" />
     <PackageReference Include="xunit" Version="2.9.3" />
@@ -38,6 +43,8 @@
     <ProjectReference Include="../../src/Pug.Scheduling.Data.SQLite/Pug.Scheduling.Data.SQLite.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Leases/Pug.Scheduling.Leases.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Leases.Data.SQLite/Pug.Scheduling.Leases.Data.SQLite.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.DependencyInjection/Pug.Scheduling.DependencyInjection.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.WebApi/Pug.Scheduling.WebApi.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
   </ItemGroup>
 

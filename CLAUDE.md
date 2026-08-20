@@ -16,13 +16,14 @@ dotnet test tests/Pug.Scheduling.Tests
 
 | Project | Role |
 |---|---|
-| `Pug.Scheduling.Models` | `ScheduleInfo { Identifier, Definition, Owner, State, ExecutionLease, Registration/LastUpdate : ActionContext<Reference> }`, `ScheduleRun` (embeds `Outcome : JobOutcome`, keeps worker-classification `Result`), `ScheduledJobContext`, `ClaimedJob`, string-constant classes (`RunTriggers`, `RunResults`, `MisfireHandlings`). |
+| `Pug.Scheduling.Models` | `WorkerInfo`, `ScheduleInfo { Identifier, Definition, Owner, State, ExecutionLease, Registration/LastUpdate : ActionContext<Reference> }`, `ScheduleRun` (embeds `Outcome : JobOutcome`, keeps worker-classification `Result`), `ScheduledJobContext`, `ClaimedJob`, string-constant classes (`RunTriggers`, `RunResults`, `MisfireHandlings`). |
 | `Pug.Scheduling.Abstractions` | `IScheduler` (config only), `IExecutionCoordinator` (workers' ONLY surface), `IExecutionLeaseProvider`, `IScheduledJobHandler`/`IScheduledJobDispatcher`, `IJobPayloadValidator`, `IJobTypeRegistry`, `IdentifierGenerator`, options records, security constants (in Abstractions by user decision). |
 | `Pug.Scheduling` | `Scheduler` facade (validation, defaults, owner-rule-then-ACL authz), `ExecutionCoordinator` (claim/misfire/retry/completion state machine), `RecurrenceCalculator` (Cronos). |
 | `Pug.Scheduling.Data.Abstractions` | Schedule-store `IDataSession` (no lease semantics; plain `GetDueSchedulesAsync`). |
 | `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores. **Postgres session is generated from the SQLite session** (`sed`: namespace + `enabled = 1 and paused = 0` → `enabled and not paused`) — keep them in sync. |
 | `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration). Lease state never touches the schedule table. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → dispatch → heartbeat → report), pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. |
+| `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (schedules) and `MapSchedulerWorkerEndpoints()` (worker management) — separate extensions so hosts prefix each independently and worker-less hosts omit the second. Multi-targeted, so it references only Abstractions/Models. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddSchedulingWorker`, `AddScheduledJobHandler<T>(jobType)` (keyed scoped), `AddJobPayloadValidator<T>`, `AddSchedulableJobType`; `InProcessJobDispatcher` (DI scope per run). |
 
 ## Domain invariants (do not regress)
@@ -39,6 +40,11 @@ dotnet test tests/Pug.Scheduling.Tests
 - Handlers are third-party: escaping exceptions / null returns become unsuccessful `JobOutcome`s;
   timeouts are worker-enforced; claim loss or shutdown ⇒ abandon without reporting.
 - All times UTC; cron in the recurrence's IANA time zone via Cronos.
+- Schedule endpoints authorize nothing themselves — `Scheduler` does; they only map
+  `NotAuthorized`/`UnknownScheduleException`/`ArgumentException` to 403/404/400. Worker endpoints
+  are the exception (`ISchedulerWorker` has no authorization): they check
+  `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker` qualified by claimant, with
+  no owner exemption.
 
 ## Conventions
 

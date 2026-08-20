@@ -148,6 +148,33 @@ Future webhook shape: standalone scheduler host (WebApi + worker) with a `Webhoo
 POSTing `ScheduledJobContext` to per-job-type endpoints — needs service-to-service auth +
 owner-identity conveyance + a completion protocol; deliberately deferred.
 
+## D15 — WebApi surface
+
+Two independent map extensions, so a host mounts (and prefixes) each where it wants and a host
+running no worker simply omits the second: `MapSchedulingEndpoints()` (schedule CRUD, pause/
+resume/run-now, run history) and `MapSchedulerWorkerEndpoints()` (worker status/pause/resume).
+`GET/POST /`, `GET/PUT/DELETE /{identifier}`, `POST /{identifier}/pause|resume|run`,
+`GET /{identifier}/runs`; worker: `GET /`, `POST /pause|resume`.
+
+- **Authorization stays where it already is.** Schedule endpoints perform none of their own — the
+  owner-rule-then-ACL check lives in `Scheduler`, so the HTTP surface only maps outcomes:
+  `NotAuthorized` → 403, `UnknownScheduleException` → 404, `ArgumentException` → 400
+  `BadRequestResultInfo`. Worker endpoints are the exception: `ISchedulerWorker` performs no
+  authorization, so they check `WorkerSecurityOperations` against
+  `SecurityObjectTypes.SchedulerWorker` qualified by the worker's **claimant** (workers are not
+  domain-scoped) — with no owner exemption, worker management being an operator concern.
+- **`ISchedulerWorker` moved to Abstractions and `WorkerInfo` to Models** (from
+  `Pug.Scheduling.Worker`): the WebApi package multi-targets `net6.0;net8.0;net10.0` and cannot
+  reference the net10.0-only worker implementation. The interface stays synchronous — it manages
+  the locally hosted instance, not a remote one; D5 is unaffected.
+- **Owner is conveyed as an `ownerType`/`ownerIdentifier` query pair** (Groups' `Subject`
+  convention) rather than a new request contract; supplying one half without the other is a 400.
+- **Run-now answers 202, not 200**: the request only brings the occurrence forward for a worker
+  to claim.
+- Query parameters the handler validates are declared nullable so omission reaches the handler
+  and yields a structured `BadRequestResultInfo`, instead of model binding failing with an empty
+  400 body.
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**
@@ -160,10 +187,8 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
 
 - **1a Models + Abstractions — DONE**  · **1b Data.Abstractions — DONE** · **1c Leases — DONE**
   · **1d implementation (core/data/worker/DI + 44 tests) — DONE**
-- **1e WebApi — NEXT**: `MapSchedulingEndpoints()` + worker management endpoints, Pug.Authorized
-  wiring + owner rule, validation pipeline; WebApplicationFactory tests incl. authorization
-  matrix (owner / other user / domain admin). Follow `Pug.Groups.WebApi/GroupsEndpoints.cs`.
-- **1f**: `.Client` (Pug.HttpApiClient), packaging metadata, README.
+  · **1e WebApi (schedule + worker endpoints, 19 endpoint tests; 63 total) — DONE**
+- **1f — NEXT**: `.Client` (Pug.HttpApiClient) over the same routes, packaging metadata, README.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).
 - **Phase 3** SaaS integration (handler + `IEmailSender`/MailKit + `IEmailSenderProvider`,
   recipient policy, output store, link-first delivery ≤ 5 MB attachments, owner impersonation at
