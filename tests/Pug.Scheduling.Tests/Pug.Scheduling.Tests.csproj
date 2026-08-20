@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Matches the net10.0-only production projects this test project references. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="10.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="dbup-sqlite" Version="5.0.40" />
+    <PackageReference Include="Dapper" Version="2.1.79" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Override Microsoft.Data.Sqlite's transitive SQLitePCLRaw (2.1.11, flagged by GHSA-2m69-gcr7-jv3q)
+         with the patched 3.x native bundle. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageReference Include="Moq" Version="4.20.72" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Pug.Scheduling/Pug.Scheduling.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.Data.SQLite/Pug.Scheduling.Data.SQLite.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.Leases/Pug.Scheduling.Leases.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.Leases.Data.SQLite/Pug.Scheduling.Leases.Data.SQLite.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
+  </ItemGroup>
+
+</Project>
