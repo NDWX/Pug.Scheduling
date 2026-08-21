@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Routing;
 using Pug.Application.Security;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.WebApi;
 

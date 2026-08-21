@@ -2,7 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Pug.Application.Security;
 using Pug.HttpApiClient;
-using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.Client;
 

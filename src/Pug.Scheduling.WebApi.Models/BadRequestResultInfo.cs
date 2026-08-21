@@ -1,12 +1,12 @@
 using System.ComponentModel.DataAnnotations;
 using System.Runtime.Serialization;
 
-namespace Pug.Scheduling.Models
+namespace Pug.Scheduling.WebApi.Models
 {
-	// Body of a 400 response: which request argument was rejected and why. A wire contract rather
-	// than a server-side detail — the API client deserializes it to reconstruct the
-	// ArgumentException the facade originally threw, so it must not live in the
-	// ASP.NET-referencing WebApi package.
+	// Body of a 400 response: which request argument was rejected and why. Shared by the endpoints
+	// that render it and the API clients that read it back — the client reconstructs the
+	// ArgumentException the facade originally threw — so it lives apart from both the
+	// ASP.NET-referencing WebApi packages and the domain models.
 	[DataContract]
 	public record BadRequestResultInfo
 	{

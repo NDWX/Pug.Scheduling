@@ -26,6 +26,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../Pug.Scheduling.Abstractions/Pug.Scheduling.Abstractions.csproj" />
+		<ProjectReference Include="../Pug.Scheduling.WebApi.Models/Pug.Scheduling.WebApi.Models.csproj" />
 	</ItemGroup>
 
 </Project>

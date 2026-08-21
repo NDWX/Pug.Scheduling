@@ -220,10 +220,13 @@ a worker host pulls in no ASP.NET-referencing package.
 
 - **Substitutability is the contract.** The clients reproduce the facades' documented exceptions,
   reversing the endpoints' mapping: 403 → `NotAuthorized`, 404 → `UnknownScheduleException` /
-  `UnknownRunException`, 400 → `ArgumentException` rebuilt from the `BadRequestResultInfo` body
-  (which moved to **Models** for exactly this — the client must parse it without the WebApi
-  package). 401 stays the transport's `AuthenticationException`: no facade contract covers failing
-  to authenticate.
+  `UnknownRunException`, 400 → `ArgumentException` rebuilt from the `BadRequestResultInfo` body.
+  That contract lives in **`Pug.Scheduling.WebApi.Models`** (user directive), a package both the
+  `.WebApi` projects that render it and the `.Client` projects that read it back may reference —
+  apart from the domain models, since it describes the HTTP surface rather than the domain, and
+  apart from the ASP.NET-referencing WebApi packages, since a worker host must not pull those in.
+  401 stays the transport's `AuthenticationException`: no facade contract covers failing to
+  authenticate.
 - **Renewal returns `false`, not an exception**, so a worker can tell "no longer mine" from "the
   call did not get through".
 - No worker-management client: `ISchedulerWorker` is synchronous and documented as local control

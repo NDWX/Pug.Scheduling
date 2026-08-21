@@ -18,6 +18,7 @@ Design rationale for every major shape lives in [`docs/DECISIONS.md`](docs/DECIS
 | `Pug.Scheduling.Leases[.Data.Abstractions/.Postgres/.SQLite]` | Execution lease arbitration in its own store. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker` — the execution pump. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddSchedulingWorker`, job type registration. |
+| `Pug.Scheduling.WebApi.Models` | HTTP surface contracts shared by the endpoints and the clients. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()`, `MapExecutionCoordinatorEndpoints()`. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` — separate so a worker host references nothing it does not need. |
 | `Pug.Scheduling.Client` | `SchedulerClient` and `ExecutionCoordinatorClient` over the HTTP surfaces. |

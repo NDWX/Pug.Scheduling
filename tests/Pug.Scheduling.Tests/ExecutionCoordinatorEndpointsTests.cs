@@ -1,6 +1,7 @@
 using System.Net;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 using Pug.Scheduling.Tests.Infrastructure;
 
 

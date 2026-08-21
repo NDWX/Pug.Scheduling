@@ -6,6 +6,7 @@ using Pug.Application.Security;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.WebApi;
 
