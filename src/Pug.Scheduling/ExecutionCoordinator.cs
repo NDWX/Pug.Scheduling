@@ -12,11 +12,11 @@ namespace Pug.Scheduling
 	// IExecutionLeaseProvider, never through the schedule store, so concurrent coordinator
 	// instances may read overlapping due candidates and race safely for the lease.
 	//
-	// Authorization lives here rather than in any hosting surface: the coordinator is the
-	// worker's only surface regardless of hosting model, so an in-process worker is held to the
-	// same grants as one calling in over a transport. Every operation requires the corresponding
-	// CoordinatorSecurityOperations grant on the claimant identity being acted as, which is what
-	// keeps one worker from claiming, renewing, or completing runs as another.
+	// Authorization lives here rather than in any hosting surface, so it cannot be bypassed by
+	// binding the coordinator differently. Every call carrying a security principal requires the
+	// corresponding CoordinatorSecurityOperations grant on the claimant identity being acted as,
+	// which is what keeps one worker from claiming, renewing, or completing runs as another;
+	// calls with no principal at all are in-process by construction and are trusted.
 	public class ExecutionCoordinator : IExecutionCoordinator
 	{
 		private readonly IdentifierGenerator _identifierGenerator;
@@ -52,8 +52,16 @@ namespace Pug.Scheduling
 
 		// Grants are qualified by the claimant identity being acted as; there is no owner rule
 		// here — execution is an operator concern, not the schedule owner's.
+		//
+		// The absence of a principal identifies an in-process caller and is trusted: every
+		// endpoint in front of the coordinator requires an authenticated caller before dispatch,
+		// so a call that crossed a transport always arrives with a principal and is always
+		// checked. A worker hosted in-process therefore needs no service identity of its own.
 		private async Task CheckAuthorizationAsync( string operation, string claimant )
 		{
+			if( _securityManager.CurrentPrincipal is null )
+				return;
+
 			bool isAuthorized = await _securityManager.CurrentPrincipal
 													.IsAuthorizedAsync(
 															new Dictionary<string, string>( 0 ),

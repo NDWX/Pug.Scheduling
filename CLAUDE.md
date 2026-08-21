@@ -47,8 +47,10 @@ dotnet test tests/Pug.Scheduling.Tests
   Endpoints only require authentication and map `NotAuthorized`/`Unknown*Exception`/
   `ArgumentException` to 403/404/400. The lone exception is worker management, whose
   `ISchedulerWorker` has no facade behind it.
-- A worker host must supply the worker a security principal granted on its claimant identity;
-  `BackgroundService` polls have no ambient one.
+- The coordinator skips the check when `ISecurityManager` reports no principal: only in-process
+  callers can reach it that way, since endpoints reject unauthenticated requests before dispatch.
+  An in-process worker needs no service identity. `Scheduler` still requires a principal — it
+  derives `Owner` and audit contexts from it.
 - Coordinator wire contracts (`JobRunClaimRequest`, `JobRunCompletion`) live in Models, never in
   the WebApi: a worker host's client must not pull in the server-side package.
 

@@ -17,6 +17,19 @@ internal static class SecurityManagerFactory
 		Create( userId, authorized: false );
 
 	/// <summary>
+	/// Creates a security manager reporting no current principal — what a host's implementation
+	/// yields for in-process calls made outside any authenticated request (a worker's polls, for
+	/// instance).
+	/// </summary>
+	internal static ISecurityManager CreateWithoutPrincipal()
+	{
+		Mock<ISecurityManager> manager = new();
+		manager.Setup( x => x.CurrentPrincipal ).Returns( (IPrincipal)null! );
+
+		return manager.Object;
+	}
+
+	/// <summary>
 	/// Creates a security manager whose principal and authorization decisions are resolved per
 	/// call, so a single registration can serve requests made by different callers (endpoint
 	/// tests) rather than one fixed user.

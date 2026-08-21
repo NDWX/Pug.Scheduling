@@ -192,21 +192,23 @@ scheduler host serves more than one scheduling surface at once (user directive).
 ## D16 — The execution coordinator authorizes its own callers (user correction)
 
 Authorization for `IExecutionCoordinator` lives **inside `ExecutionCoordinator`**, not in the
-coordinator endpoints where it was first placed. The coordinator is the worker's only surface
-regardless of hosting model (D5), so putting the check in the HTTP layer would have held remote
-workers to grants that in-process workers bypass entirely — the inconsistency D5 exists to
-prevent. Each operation requires its `CoordinatorSecurityOperations` grant on
-`SecurityObjectTypes.ExecutionCoordinator` qualified by the **claimant identity being acted as**
-(`ResourceQualifiers.ExecutionCoordinator`), so one worker's credentials cannot claim, renew, or
-complete runs as another. There is no owner rule: execution is an operator concern, not the
+coordinator endpoints where it was first placed. Keeping it in the facade means it cannot be
+bypassed by binding the coordinator differently — the HTTP layer would only have guarded the one
+transport it happens to serve. Each operation requires its `CoordinatorSecurityOperations` grant
+on `SecurityObjectTypes.ExecutionCoordinator` qualified by the **claimant identity being acted
+as** (`ResourceQualifiers.ExecutionCoordinator`), so one worker's credentials cannot claim, renew,
+or complete runs as another. There is no owner rule: execution is an operator concern, not the
 schedule owner's.
 
-**Consequence for hosts:** an in-process `SchedulerWorker` now needs a security principal of its
-own — its polls run under whatever the host's `ISecurityManager` reports ambiently, and a
-`BackgroundService` has no request to inherit one from. A worker host must establish a service
-principal (granted `CLAIM_JOBS`/`RENEW_CLAIM`/`REPORT_COMPLETION` on its claimant identity) around
-the worker's calls. Unresolved in this repo — the mechanism belongs to the host's
-`ISecurityManager` implementation, and Phase 3's owner-impersonation work covers the same ground.
+**A call arriving with no principal at all is trusted and skips the check** (user directive).
+Every endpoint in front of the coordinator requires an authenticated caller before dispatch, so a
+call that crossed a transport always carries a principal; the absence of one identifies an
+in-process caller. An in-process `SchedulerWorker` therefore needs no service identity and holds
+no grants — its `BackgroundService` polls simply run outside any authenticated request. Hosts
+should note the corollary: an `ISecurityManager` that manufactures a non-null anonymous or system
+principal for background contexts will be *checked*, not skipped, and must then be granted.
+(`Scheduler` is unaffected and still requires a principal — it derives schedule `Owner` and audit
+contexts from it.)
 
 ## Verification conventions
 
@@ -220,7 +222,7 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
 
 - **1a Models + Abstractions — DONE**  · **1b Data.Abstractions — DONE** · **1c Leases — DONE**
   · **1d implementation (core/data/worker/DI + 44 tests) — DONE**
-  · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 74
+  · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 75
   total) — DONE**
 - **1f — NEXT**: `.Client` (Pug.HttpApiClient) over the same routes — covering **both**
   `IScheduler` and `IExecutionCoordinator`, the latter being what an out-of-process worker binds

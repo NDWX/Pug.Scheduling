@@ -378,4 +378,34 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 						job.Context.Run, "unauthorized-worker", RunResults.Succeeded,
 						new JobOutcome { Successful = true } ) );
 	}
+
+	[Fact]
+	public async Task InProcessCallerWithoutPrincipalIsNotChecked()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		// No principal identifies an in-process caller: endpoints reject unauthenticated requests
+		// before dispatch, so a call arriving without one cannot have crossed a transport. An
+		// in-process worker therefore needs no service identity, and holds no grants.
+		ExecutionCoordinator inProcess = new(
+				new SequentialIdGenerator( "run-in-process" ),
+				_scheduleDatabase.ApplicationData,
+				_leaseProvider,
+				SecurityManagerFactory.CreateWithoutPrincipal(),
+				new ExecutionCoordinatorOptions() );
+
+		ClaimedJob job = Assert.Single(
+				await inProcess.ClaimDueJobsAsync( "in-process-worker", 10 ),
+				claimed => claimed.Context.Schedule == schedule );
+
+		Assert.True( await inProcess.RenewClaimAsync( job.Context.Run, "in-process-worker" ) );
+
+		await inProcess.ReportCompletionAsync(
+				job.Context.Run, "in-process-worker", RunResults.Succeeded,
+				new JobOutcome { Successful = true } );
+
+		ScheduleRun run = Assert.Single( await GetRunsAsync( schedule ) );
+
+		Assert.Equal( RunResults.Succeeded, run.Result );
+	}
 }
