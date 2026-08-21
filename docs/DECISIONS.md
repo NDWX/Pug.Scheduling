@@ -210,6 +210,43 @@ principal for background contexts will be *checked*, not skipped, and must then 
 (`Scheduler` is unaffected and still requires a principal — it derives schedule `Owner` and audit
 contexts from it.)
 
+## D17 — API clients
+
+`Pug.Scheduling.Client` implements **both** facades over the 1e routes: `SchedulerClient`
+(`IScheduler`) and `ExecutionCoordinatorClient` (`IExecutionCoordinator`), the latter being what an
+out-of-process worker host binds so `SchedulerWorker` runs unchanged against a remote scheduler
+(user directive). Built on `Pug.HttpApiClient` 0.6.0; the package references only Abstractions, so
+a worker host pulls in no ASP.NET-referencing package.
+
+- **Substitutability is the contract.** The clients reproduce the facades' documented exceptions,
+  reversing the endpoints' mapping: 403 → `NotAuthorized`, 404 → `UnknownScheduleException` /
+  `UnknownRunException`, 400 → `ArgumentException` rebuilt from the `BadRequestResultInfo` body
+  (which moved to **Models** for exactly this — the client must parse it without the WebApi
+  package). 401 stays the transport's `AuthenticationException`: no facade contract covers failing
+  to authenticate.
+- **Renewal returns `false`, not an exception**, so a worker can tell "no longer mine" from "the
+  call did not get through".
+- No worker-management client: `ISchedulerWorker` is synchronous and documented as local control
+  of the in-process instance; a remote one would need a different, async contract.
+- No DI extensions in the client package — binding is one registration, and keeping
+  `Microsoft.Extensions.DependencyInjection` out keeps the package usable from a bare worker host.
+  The README carries the wiring.
+- Workaround: `Pug.HttpApiClient` 0.6.0 aggregates the query collection without a seed, so an
+  **empty** (non-null) query dictionary throws where null is handled. The client passes null when
+  it has nothing to ask.
+
+## D18 — SQLite timestamps are stamped UTC on read (defect found in 1f)
+
+The SQLite stores keep timestamps as ISO-8601 text without an offset, so the provider returned them
+as `DateTimeKind.Unspecified` while the Postgres `timestamptz` columns return `Utc` — the two
+providers disagreed, and a consumer calling `ToLocalTime()` on a schedule's `NextRun` would have
+shifted a value that was already UTC. Both SQLite sessions now stamp `DateTimeKind.Utc` on read
+(schedule `NotBefore`/`NotAfter`/`NextRun`, run `ScheduledFor`/`Started`/`Finished`, lease
+`Expiry`). JSON columns were never affected — `System.Text.Json` round-trips the `Z`.
+
+Surfaced by the client round-trip tests, which assert on `Kind` because the wire format makes the
+difference visible; the in-process tests had only ever compared instants.
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**
@@ -224,9 +261,9 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
   · **1d implementation (core/data/worker/DI + 44 tests) — DONE**
   · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 75
   total) — DONE**
-- **1f — NEXT**: `.Client` (Pug.HttpApiClient) over the same routes — covering **both**
-  `IScheduler` and `IExecutionCoordinator`, the latter being what an out-of-process worker binds
-  to; packaging metadata, README.
+  · **1f `.Client` (both facades), packaging metadata, README — DONE (88 tests)**
+- **Phase 1 COMPLETE.** Carry-overs: Postgres Testcontainers races in CI; webhook dispatch (D14)
+  still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).
 - **Phase 3** SaaS integration (handler + `IEmailSender`/MailKit + `IEmailSenderProvider`,
   recipient policy, output store, link-first delivery ≤ 5 MB attachments, owner impersonation at

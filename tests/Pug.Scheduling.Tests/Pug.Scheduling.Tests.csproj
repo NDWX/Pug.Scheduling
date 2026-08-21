@@ -44,6 +44,7 @@
     <ProjectReference Include="../../src/Pug.Scheduling.Leases/Pug.Scheduling.Leases.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Leases.Data.SQLite/Pug.Scheduling.Leases.Data.SQLite.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.DependencyInjection/Pug.Scheduling.DependencyInjection.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.Client/Pug.Scheduling.Client.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.WebApi/Pug.Scheduling.WebApi.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Worker.WebApi/Pug.Scheduling.Worker.WebApi.csproj" />

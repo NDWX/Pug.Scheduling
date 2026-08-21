@@ -2,7 +2,7 @@ using System.Net;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
 using Pug.Scheduling.Tests.Infrastructure;
-using Pug.Scheduling.WebApi;
+
 
 namespace Pug.Scheduling.Tests;
 

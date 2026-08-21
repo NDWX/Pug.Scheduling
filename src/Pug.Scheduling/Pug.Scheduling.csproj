@@ -5,6 +5,8 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Product>Pug.Scheduling</Product>
 		<Title>Pug.Scheduling</Title>
+		<Authors>Andrian</Authors>
+		<Description>Tenant-aware, database-backed job scheduling: schedule management facade and execution coordinator.</Description>
 		<RepositoryType>Git</RepositoryType>
 		<RepositoryUrl>https://github.com/NDWX/Pug.Scheduling.git</RepositoryUrl>
 		<AssemblyVersion>0.0.0.1</AssemblyVersion>

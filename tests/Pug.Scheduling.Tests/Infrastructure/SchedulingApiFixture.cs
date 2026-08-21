@@ -10,6 +10,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Http;
 using Pug.Application.Data;
 using Pug.Application.Security;
+using Pug.HttpApiClient;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.DependencyInjection;
@@ -130,6 +131,13 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 
 		return client;
 	}
+
+	/// <summary>
+	/// <see cref="IHttpApiClient"/> over the TestServer, authenticated as the given user — what
+	/// the scheduling API clients are constructed with.
+	/// </summary>
+	internal IHttpApiClient CreateApiClient( string? user ) =>
+		new HttpApiClient.HttpApiClient( new Uri( "http://localhost/" ), new TestHttpClientFactory( this, user ) );
 
 	internal static HttpContent JsonContent<T>( T value )
 	{

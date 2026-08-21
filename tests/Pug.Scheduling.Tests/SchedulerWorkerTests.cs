@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.Tests.Infrastructure;
 using Pug.Scheduling.Worker;
 
 namespace Pug.Scheduling.Tests;
@@ -37,19 +38,6 @@ public class SchedulerWorkerTests
 
 			return Task.CompletedTask;
 		}
-	}
-
-	private sealed class DelegateDispatcher : IScheduledJobDispatcher
-	{
-		private readonly Func<ScheduledJobContext, CancellationToken, Task<JobOutcome>> _dispatch;
-
-		public DelegateDispatcher( Func<ScheduledJobContext, CancellationToken, Task<JobOutcome>> dispatch )
-		{
-			_dispatch = dispatch;
-		}
-
-		public Task<JobOutcome> DispatchAsync( ScheduledJobContext context, CancellationToken cancellationToken ) =>
-			_dispatch( context, cancellationToken );
 	}
 
 	private static ClaimedJob NewJob( TimeSpan? timeout = null ) =>

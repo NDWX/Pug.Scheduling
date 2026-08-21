@@ -46,13 +46,21 @@ namespace Pug.Scheduling.Leases.Data.SQLite
 				);
 		}
 
-		public Task<ExecutionLease?> GetAsync( string schedule, DateTime now )
+		public async Task<ExecutionLease?> GetAsync( string schedule, DateTime now )
 		{
-			return Connection.QueryFirstOrDefaultAsync<ExecutionLease?>(
-					@"select claimedBy as ClaimedBy, expiry as Expiry from executionLease
-						where schedule = @schedule and expiry > @now;",
-					new { schedule, now }
-				);
+			ExecutionLease? lease =
+				await Connection.QueryFirstOrDefaultAsync<ExecutionLease?>(
+								@"select claimedBy as ClaimedBy, expiry as Expiry from executionLease
+									where schedule = @schedule and expiry > @now;",
+								new { schedule, now }
+							)
+							.ConfigureAwait( false );
+
+			// SQLite returns its ISO-8601 text columns as DateTimeKind.Unspecified; lease expiry
+			// is UTC like every other time in this domain, and the Postgres provider says so.
+			return lease is null
+					? null
+					: lease with { Expiry = DateTime.SpecifyKind( lease.Expiry, DateTimeKind.Utc ) };
 		}
 
 		public Task PurgeExpiredAsync( DateTime now )

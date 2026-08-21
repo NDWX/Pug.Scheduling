@@ -25,6 +25,7 @@ dotnet test tests/Pug.Scheduling.Tests
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → dispatch → heartbeat → report), pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…`, the out-of-process worker transport). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Multi-targeted, so it references only Abstractions/Models. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`worker/…`). Its own package so an out-of-process worker host references nothing it does not need. |
+| `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes; reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions only — a worker host must not pull in ASP.NET. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddSchedulingWorker`, `AddScheduledJobHandler<T>(jobType)` (keyed scoped), `AddJobPayloadValidator<T>`, `AddSchedulableJobType`; `InProcessJobDispatcher` (DI scope per run). |
 
 ## Domain invariants (do not regress)
@@ -51,8 +52,10 @@ dotnet test tests/Pug.Scheduling.Tests
   callers can reach it that way, since endpoints reject unauthenticated requests before dispatch.
   An in-process worker needs no service identity. `Scheduler` still requires a principal — it
   derives `Owner` and audit contexts from it.
-- Coordinator wire contracts (`JobRunClaimRequest`, `JobRunCompletion`) live in Models, never in
-  the WebApi: a worker host's client must not pull in the server-side package.
+- Wire contracts (`JobRunClaimRequest`, `JobRunCompletion`, `BadRequestResultInfo`) live in Models,
+  never in the WebApi: a worker host's client must not pull in the server-side package.
+- All times are UTC and say so: the SQLite sessions stamp `DateTimeKind.Utc` on read, matching
+  Postgres `timestamptz`. Do not regress this — the two providers must agree.
 
 ## Conventions
 

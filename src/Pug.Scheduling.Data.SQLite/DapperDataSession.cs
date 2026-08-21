@@ -60,6 +60,25 @@ namespace Pug.Scheduling.Data.SQLite
 			@"identifier, schedule, domain, scheduledFor, started, finished, attempt,
 				runTrigger as Trigger, result, outcome";
 
+		// SQLite stores timestamps as ISO-8601 text without an offset, so the provider hands them
+		// back as DateTimeKind.Unspecified. Every time in this domain is UTC (and the Postgres
+		// provider's timestamptz columns say so), which makes stamping the kind on read the
+		// difference between the two providers agreeing and a consumer's ToLocalTime() silently
+		// shifting the value.
+		private static DateTime AsUtc( DateTime value ) => DateTime.SpecifyKind( value, DateTimeKind.Utc );
+
+		private static DateTime? AsUtc( DateTime? value ) => value is null ? null : AsUtc( value.Value );
+
+		private static ScheduleRun? AsUtc( ScheduleRun? run ) =>
+			run is null
+				? null
+				: run with
+				{
+					ScheduledFor = AsUtc( run.ScheduledFor ),
+					Started = AsUtc( run.Started ),
+					Finished = AsUtc( run.Finished )
+				};
+
 		private static ScheduleInfo Compose( ScheduleRow row ) =>
 			new()
 			{
@@ -78,8 +97,8 @@ namespace Pug.Scheduling.Data.SQLite
 										? null
 										: TimeSpan.FromSeconds( row.intervalSeconds.Value ),
 						TimeZone = row.timeZone,
-						NotBefore = row.notBefore,
-						NotAfter = row.notAfter
+						NotBefore = AsUtc( row.notBefore ),
+						NotAfter = AsUtc( row.notAfter )
 					},
 					MisfirePolicy = new MisfirePolicy
 					{
@@ -97,7 +116,7 @@ namespace Pug.Scheduling.Data.SQLite
 				{
 					Enabled = row.enabled,
 					Paused = row.paused,
-					NextRun = row.nextRun,
+					NextRun = AsUtc( row.nextRun ),
 					RunRequested = row.runRequested,
 					Attempt = row.attempt,
 					LastRun = row.lastRun
@@ -294,20 +313,26 @@ namespace Pug.Scheduling.Data.SQLite
 				);
 		}
 
-		public Task<ScheduleRun?> GetRunAsync( string identifier )
+		public async Task<ScheduleRun?> GetRunAsync( string identifier )
 		{
-			return Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
-					$"select {RunColumns} from scheduleRun where identifier = @identifier;",
-					new { identifier }
+			return AsUtc(
+					await Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
+									$"select {RunColumns} from scheduleRun where identifier = @identifier;",
+									new { identifier }
+								)
+								.ConfigureAwait( false )
 				);
 		}
 
-		public Task<ScheduleRun?> GetLatestRunAsync( string schedule )
+		public async Task<ScheduleRun?> GetLatestRunAsync( string schedule )
 		{
-			return Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
-					$@"select {RunColumns} from scheduleRun where schedule = @schedule
-						order by started desc limit 1;",
-					new { schedule }
+			return AsUtc(
+					await Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
+									$@"select {RunColumns} from scheduleRun where schedule = @schedule
+										order by started desc limit 1;",
+									new { schedule }
+								)
+								.ConfigureAwait( false )
 				);
 		}
 
@@ -347,7 +372,7 @@ namespace Pug.Scheduling.Data.SQLite
 													new { schedule, from, to }
 												).ConfigureAwait( false );
 
-			return runs.ToList();
+			return runs.Select( run => AsUtc( run )! ).ToList();
 		}
 	}
 }
