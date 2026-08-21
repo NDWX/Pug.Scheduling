@@ -164,8 +164,9 @@ scheduler host serves more than one scheduling surface at once (user directive).
   contract is `IExecutionCoordinator` unchanged, so D5 holds over HTTP — a remote worker still
   never reaches the data backend, and due-ness/misfire/retry/next-occurrence stay behind the
   facade. Request bodies `JobRunClaimRequest { Claimant, MaximumJobs }` and
-  `JobRunCompletion { Result, Outcome }` live in **Models**, not the WebApi, so a worker host's
-  client never pulls in the server-side (ASP.NET-referencing) package. Renewal answers `200` with
+  `JobRunCompletion { Result, Outcome }` live in **`Pug.Scheduling.WebApi.Models`** (see D17): HTTP
+  surface contracts, not domain models — nothing but the transport uses them — and deliberately
+  outside the ASP.NET-referencing WebApi packages so a worker host's client never pulls those in. Renewal answers `200` with
   the coordinator's boolean: a lost claim is an expected heartbeat outcome, not a request failure.
 - **Worker management endpoints are their own package** `Pug.Scheduling.Worker.WebApi` (user
   directive): a worker hosted out-of-process reaches the scheduler solely through the coordinator
@@ -221,12 +222,14 @@ a worker host pulls in no ASP.NET-referencing package.
 - **Substitutability is the contract.** The clients reproduce the facades' documented exceptions,
   reversing the endpoints' mapping: 403 → `NotAuthorized`, 404 → `UnknownScheduleException` /
   `UnknownRunException`, 400 → `ArgumentException` rebuilt from the `BadRequestResultInfo` body.
-  That contract lives in **`Pug.Scheduling.WebApi.Models`** (user directive), a package both the
-  `.WebApi` projects that render it and the `.Client` projects that read it back may reference —
-  apart from the domain models, since it describes the HTTP surface rather than the domain, and
-  apart from the ASP.NET-referencing WebApi packages, since a worker host must not pull those in.
   401 stays the transport's `AuthenticationException`: no facade contract covers failing to
   authenticate.
+- **`Pug.Scheduling.WebApi.Models` holds every HTTP surface contract** (user directive):
+  `BadRequestResultInfo`, `JobRunClaimRequest`, `JobRunCompletion`. Both the `.WebApi` projects that
+  render them and the `.Client` projects that read them back may reference it. It sits apart from
+  the domain models — these describe the transport, and nothing in the domain uses them — and apart
+  from the ASP.NET-referencing WebApi packages, since a worker host must not pull those in. It
+  references Models only for the domain types the contracts carry (`JobOutcome`).
 - **Renewal returns `false`, not an exception**, so a worker can tell "no longer mine" from "the
   call did not get through".
 - No worker-management client: `ISchedulerWorker` is synchronous and documented as local control

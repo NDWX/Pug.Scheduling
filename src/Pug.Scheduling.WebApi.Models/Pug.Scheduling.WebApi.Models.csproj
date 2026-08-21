@@ -18,4 +18,8 @@
 		<PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
 	</PropertyGroup>
 
+	<ItemGroup>
+		<ProjectReference Include="../Pug.Scheduling.Models/Pug.Scheduling.Models.csproj" />
+	</ItemGroup>
+
 </Project>

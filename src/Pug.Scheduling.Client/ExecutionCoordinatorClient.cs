@@ -2,6 +2,7 @@ using Pug.HttpApiClient;
 using Pug.HttpApiClient.Json;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.Client;
 

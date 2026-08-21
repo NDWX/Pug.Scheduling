@@ -1,7 +1,8 @@
 using System.ComponentModel.DataAnnotations;
 using System.Runtime.Serialization;
+using Pug.Scheduling.Models;
 
-namespace Pug.Scheduling.Models
+namespace Pug.Scheduling.WebApi.Models
 {
 	// Request body of IExecutionCoordinator.ReportCompletionAsync when the coordinator is reached
 	// over the wire by an externally hosted worker.

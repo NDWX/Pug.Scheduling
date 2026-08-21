@@ -1,11 +1,11 @@
 using System.ComponentModel.DataAnnotations;
 using System.Runtime.Serialization;
 
-namespace Pug.Scheduling.Models
+namespace Pug.Scheduling.WebApi.Models
 {
 	// Request body of IExecutionCoordinator.ClaimDueJobsAsync when the coordinator is reached over
-	// the wire by an externally hosted worker. Lives with the models rather than the WebApi so a
-	// worker host's coordinator client need not reference the server-side package.
+	// the wire by an externally hosted worker: an HTTP surface contract, not a domain model —
+	// nothing but the transport uses it.
 	[DataContract]
 	public record JobRunClaimRequest
 	{

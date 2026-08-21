@@ -23,7 +23,7 @@ dotnet test tests/Pug.Scheduling.Tests
 | `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores. **Postgres session is generated from the SQLite session** (`sed`: namespace + `enabled = 1 and paused = 0` → `enabled and not paused`) — keep them in sync. |
 | `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration). Lease state never touches the schedule table. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → dispatch → heartbeat → report), pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. |
-| `Pug.Scheduling.WebApi.Models` | HTTP surface contracts shared by endpoints and clients (`BadRequestResultInfo`). Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
+| `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `JobRunClaimRequest`, `JobRunCompletion`. Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…`, the out-of-process worker transport). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Multi-targeted, so it references only Abstractions/Models. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`worker/…`). Its own package so an out-of-process worker host references nothing it does not need. |
 | `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes; reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions only — a worker host must not pull in ASP.NET. |
@@ -53,9 +53,9 @@ dotnet test tests/Pug.Scheduling.Tests
   callers can reach it that way, since endpoints reject unauthenticated requests before dispatch.
   An in-process worker needs no service identity. `Scheduler` still requires a principal — it
   derives `Owner` and audit contexts from it.
-- Wire contracts never live in a `.WebApi` package — a worker host's client must not pull in
-  ASP.NET. Coordinator request bodies (`JobRunClaimRequest`, `JobRunCompletion`) are in Models;
-  HTTP-surface contracts (`BadRequestResultInfo`) are in `Pug.Scheduling.WebApi.Models`.
+- Every HTTP surface contract belongs in `Pug.Scheduling.WebApi.Models` — not in Models (they
+  describe the transport, not the domain) and not in a `.WebApi` package (a worker host's client
+  must not pull in ASP.NET).
 - All times are UTC and say so: the SQLite sessions stamp `DateTimeKind.Utc` on read, matching
   Postgres `timestamptz`. Do not regress this — the two providers must agree.
 
