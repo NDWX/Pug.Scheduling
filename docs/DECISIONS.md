@@ -148,25 +148,41 @@ Future webhook shape: standalone scheduler host (WebApi + worker) with a `Webhoo
 POSTing `ScheduledJobContext` to per-job-type endpoints — needs service-to-service auth +
 owner-identity conveyance + a completion protocol; deliberately deferred.
 
-## D15 — WebApi surface
+## D15 — WebApi surfaces
 
-Two independent map extensions, so a host mounts (and prefixes) each where it wants and a host
-running no worker simply omits the second: `MapSchedulingEndpoints()` (schedule CRUD, pause/
-resume/run-now, run history) and `MapSchedulerWorkerEndpoints()` (worker status/pause/resume).
-`GET/POST /`, `GET/PUT/DELETE /{identifier}`, `POST /{identifier}/pause|resume|run`,
-`GET /{identifier}/runs`; worker: `GET /`, `POST /pause|resume`.
+Three separately mapped surfaces, each carrying **its own route prefix** rather than relying on
+the host to supply one: a host's routes cannot be assumed to be the scheduler's alone, and the
+scheduler host serves more than one scheduling surface at once (user directive).
 
+| Extension | Package | Routes |
+|---|---|---|
+| `MapSchedulingEndpoints()` | `Pug.Scheduling.WebApi` | `GET/POST schedules`, `GET/PUT/DELETE schedules/{identifier}`, `POST schedules/{identifier}/pause|resume|run`, `GET schedules/{identifier}/runs` |
+| `MapExecutionCoordinatorEndpoints()` | `Pug.Scheduling.WebApi` | `POST executionCoordinator/JobRunClaims`, `POST executionCoordinator/JobRuns/{run}/leaseRenewal?worker=`, `POST executionCoordinator/JobRuns/{run}/completion?worker=` |
+| `MapSchedulerWorkerEndpoints()` | `Pug.Scheduling.Worker.WebApi` | `GET worker`, `POST worker/pause|resume` |
+
+- **Coordinator endpoints are the out-of-process worker's transport** (user directive): the wire
+  contract is `IExecutionCoordinator` unchanged, so D5 holds over HTTP — a remote worker still
+  never reaches the data backend, and due-ness/misfire/retry/next-occurrence stay behind the
+  facade. Request bodies `JobRunClaimRequest { Claimant, MaximumJobs }` and
+  `JobRunCompletion { Result, Outcome }` live in **Models**, not the WebApi, so a worker host's
+  client never pulls in the server-side (ASP.NET-referencing) package. Renewal answers `200` with
+  the coordinator's boolean: a lost claim is an expected heartbeat outcome, not a request failure.
+- **Worker management endpoints are their own package** `Pug.Scheduling.Worker.WebApi` (user
+  directive): a worker hosted out-of-process reaches the scheduler solely through the coordinator
+  transport and must not have to reference packages it does not need.
 - **Authorization stays where it already is.** Schedule endpoints perform none of their own — the
   owner-rule-then-ACL check lives in `Scheduler`, so the HTTP surface only maps outcomes:
-  `NotAuthorized` → 403, `UnknownScheduleException` → 404, `ArgumentException` → 400
-  `BadRequestResultInfo`. Worker endpoints are the exception: `ISchedulerWorker` performs no
-  authorization, so they check `WorkerSecurityOperations` against
-  `SecurityObjectTypes.SchedulerWorker` qualified by the worker's **claimant** (workers are not
-  domain-scoped) — with no owner exemption, worker management being an operator concern.
+  `NotAuthorized` → 403, `UnknownScheduleException`/`UnknownRunException` → 404,
+  `ArgumentException` → 400 `BadRequestResultInfo`. The other two surfaces are trust boundaries
+  their facades do not guard, so they authorize explicitly and with no owner exemption:
+  `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`, and
+  `CoordinatorSecurityOperations` on `SecurityObjectTypes.ExecutionCoordinator` — both **qualified
+  by claimant identity**, so one worker's credentials cannot manage, claim, renew or complete as
+  another.
 - **`ISchedulerWorker` moved to Abstractions and `WorkerInfo` to Models** (from
-  `Pug.Scheduling.Worker`): the WebApi package multi-targets `net6.0;net8.0;net10.0` and cannot
+  `Pug.Scheduling.Worker`): both WebApi packages multi-target `net6.0;net8.0;net10.0` and cannot
   reference the net10.0-only worker implementation. The interface stays synchronous — it manages
-  the locally hosted instance, not a remote one; D5 is unaffected.
+  the locally hosted instance, not a remote one.
 - **Owner is conveyed as an `ownerType`/`ownerIdentifier` query pair** (Groups' `Subject`
   convention) rather than a new request contract; supplying one half without the other is a 400.
 - **Run-now answers 202, not 200**: the request only brings the occurrence forward for a worker
@@ -187,8 +203,11 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
 
 - **1a Models + Abstractions — DONE**  · **1b Data.Abstractions — DONE** · **1c Leases — DONE**
   · **1d implementation (core/data/worker/DI + 44 tests) — DONE**
-  · **1e WebApi (schedule + worker endpoints, 19 endpoint tests; 63 total) — DONE**
-- **1f — NEXT**: `.Client` (Pug.HttpApiClient) over the same routes, packaging metadata, README.
+  · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 73
+  total) — DONE**
+- **1f — NEXT**: `.Client` (Pug.HttpApiClient) over the same routes — covering **both**
+  `IScheduler` and `IExecutionCoordinator`, the latter being what an out-of-process worker binds
+  to; packaging metadata, README.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).
 - **Phase 3** SaaS integration (handler + `IEmailSender`/MailKit + `IEmailSenderProvider`,
   recipient policy, output store, link-first delivery ≤ 5 MB attachments, owner impersonation at

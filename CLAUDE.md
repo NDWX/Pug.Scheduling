@@ -23,7 +23,8 @@ dotnet test tests/Pug.Scheduling.Tests
 | `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores. **Postgres session is generated from the SQLite session** (`sed`: namespace + `enabled = 1 and paused = 0` → `enabled and not paused`) — keep them in sync. |
 | `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration). Lease state never touches the schedule table. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → dispatch → heartbeat → report), pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. |
-| `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (schedules) and `MapSchedulerWorkerEndpoints()` (worker management) — separate extensions so hosts prefix each independently and worker-less hosts omit the second. Multi-targeted, so it references only Abstractions/Models. |
+| `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…`, the out-of-process worker transport). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Multi-targeted, so it references only Abstractions/Models. |
+| `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`worker/…`). Its own package so an out-of-process worker host references nothing it does not need. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddSchedulingWorker`, `AddScheduledJobHandler<T>(jobType)` (keyed scoped), `AddJobPayloadValidator<T>`, `AddSchedulableJobType`; `InProcessJobDispatcher` (DI scope per run). |
 
 ## Domain invariants (do not regress)
@@ -41,10 +42,12 @@ dotnet test tests/Pug.Scheduling.Tests
   timeouts are worker-enforced; claim loss or shutdown ⇒ abandon without reporting.
 - All times UTC; cron in the recurrence's IANA time zone via Cronos.
 - Schedule endpoints authorize nothing themselves — `Scheduler` does; they only map
-  `NotAuthorized`/`UnknownScheduleException`/`ArgumentException` to 403/404/400. Worker endpoints
-  are the exception (`ISchedulerWorker` has no authorization): they check
-  `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker` qualified by claimant, with
-  no owner exemption.
+  `NotAuthorized`/`Unknown*Exception`/`ArgumentException` to 403/404/400. The worker and
+  coordinator endpoints are the exception — their facades guard nothing — so they check
+  `WorkerSecurityOperations` / `CoordinatorSecurityOperations` qualified by **claimant identity**,
+  with no owner exemption.
+- Coordinator wire contracts (`JobRunClaimRequest`, `JobRunCompletion`) live in Models, never in
+  the WebApi: a worker host's client must not pull in the server-side package.
 
 ## Conventions
 

@@ -15,6 +15,7 @@ using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.DependencyInjection;
 using Pug.Scheduling.Leases;
 using Pug.Scheduling.WebApi;
+using Pug.Scheduling.Worker.WebApi;
 
 namespace Pug.Scheduling.Tests.Infrastructure;
 
@@ -104,11 +105,14 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		app.UseAuthentication();
 		app.UseAuthorization();
 
+		// Each surface carries its own prefix, so they are mapped at the application root — the
+		// layout a combined scheduler host uses.
 		app.UseEndpoints(
 				endpoints =>
 				{
-					endpoints.MapGroup( "/schedules" ).MapSchedulingEndpoints();
-					endpoints.MapGroup( "/scheduler/worker" ).MapSchedulerWorkerEndpoints();
+					endpoints.MapSchedulingEndpoints();
+					endpoints.MapExecutionCoordinatorEndpoints();
+					endpoints.MapSchedulerWorkerEndpoints();
 				}
 			);
 	}

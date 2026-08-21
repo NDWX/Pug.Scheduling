@@ -46,6 +46,7 @@
     <ProjectReference Include="../../src/Pug.Scheduling.DependencyInjection/Pug.Scheduling.DependencyInjection.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.WebApi/Pug.Scheduling.WebApi.csproj" />
     <ProjectReference Include="../../src/Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
+    <ProjectReference Include="../../src/Pug.Scheduling.Worker.WebApi/Pug.Scheduling.Worker.WebApi.csproj" />
   </ItemGroup>
 
 </Project>

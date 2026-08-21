@@ -6,15 +6,16 @@ using Pug.Application.Security;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
 
-namespace Pug.Scheduling.WebApi;
+namespace Pug.Scheduling.Worker.WebApi;
 
 public static class SchedulerWorkerEndpoints
 {
 	/// <summary>
-	/// Maps management endpoints for the worker instance hosted in this process onto the given
-	/// route builder — mount them under their own prefix (e.g. <c>app.MapGroup("/scheduler/worker")</c>),
-	/// separate from the schedule endpoints. Hosts that do not run a worker simply do not map
-	/// them.
+	/// Maps management endpoints for the worker instance hosted in this process, under their own
+	/// <c>worker/</c> prefix, onto the given route builder. They live in their own package
+	/// because a worker may be hosted out-of-process, where the host reaches the scheduler solely
+	/// through the execution coordinator's transport and has no reason to reference the
+	/// scheduler's own WebApi.
 	/// Unlike the schedule endpoints, these enforce authorization themselves:
 	/// <see cref="ISchedulerWorker"/> performs none, so every caller requires an explicit
 	/// <see cref="WorkerSecurityOperations"/> grant on
@@ -23,7 +24,7 @@ public static class SchedulerWorkerEndpoints
 	/// </summary>
 	public static IEndpointRouteBuilder MapSchedulerWorkerEndpoints( this IEndpointRouteBuilder routes )
 	{
-		routes.MapGet( "", GetWorkerInfo )
+		routes.MapGet( "worker", GetWorkerInfo )
 			.RequireAuthorization()
 			.WithName( "GetSchedulerWorkerInfo" )
 #if NET7_0_OR_GREATER
@@ -33,7 +34,7 @@ public static class SchedulerWorkerEndpoints
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "pause", PauseWorker )
+		routes.MapPost( "worker/pause", PauseWorker )
 			.RequireAuthorization()
 			.WithName( "PauseSchedulerWorker" )
 #if NET7_0_OR_GREATER
@@ -43,7 +44,7 @@ public static class SchedulerWorkerEndpoints
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "resume", ResumeWorker )
+		routes.MapPost( "worker/resume", ResumeWorker )
 			.RequireAuthorization()
 			.WithName( "ResumeSchedulerWorker" )
 #if NET7_0_OR_GREATER

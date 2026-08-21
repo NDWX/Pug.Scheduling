@@ -2,6 +2,7 @@ using System.Net;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
 using Pug.Scheduling.Tests.Infrastructure;
+using Pug.Scheduling.Worker.WebApi;
 
 namespace Pug.Scheduling.Tests;
 
@@ -22,15 +23,18 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 		_fixture = fixture;
 	}
 
+	// Worker grants are qualified by the claimant identity of the worker being managed.
 	private void GrantOperator( string operation ) =>
-		_fixture.Authorizations.Grant( Operator, operation, SecurityObjectTypes.SchedulerWorker );
+		_fixture.Authorizations.Grant(
+				Operator, operation, SecurityObjectTypes.SchedulerWorker,
+				identifier: FakeSchedulerWorker.Claimant );
 
 	[Fact]
 	public async Task UnauthenticatedRequestIsRejected()
 	{
 		using HttpClient client = _fixture.CreateClient( null );
 
-		Assert.Equal( HttpStatusCode.Unauthorized, ( await client.GetAsync( "/scheduler/worker" ) ).StatusCode );
+		Assert.Equal( HttpStatusCode.Unauthorized, ( await client.GetAsync( "/worker" ) ).StatusCode );
 	}
 
 	[Fact]
@@ -38,13 +42,13 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 	{
 		using HttpClient denied = _fixture.CreateClient( OrdinaryUser );
 
-		Assert.Equal( HttpStatusCode.Forbidden, ( await denied.GetAsync( "/scheduler/worker" ) ).StatusCode );
+		Assert.Equal( HttpStatusCode.Forbidden, ( await denied.GetAsync( "/worker" ) ).StatusCode );
 
 		GrantOperator( WorkerSecurityOperations.GetInfo );
 
 		using HttpClient granted = _fixture.CreateClient( Operator );
 
-		HttpResponseMessage response = await granted.GetAsync( "/scheduler/worker" );
+		HttpResponseMessage response = await granted.GetAsync( "/worker" );
 
 		Assert.Equal( HttpStatusCode.OK, response.StatusCode );
 
@@ -60,10 +64,10 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 		using HttpClient denied = _fixture.CreateClient( OrdinaryUser );
 
 		Assert.Equal(
-				HttpStatusCode.Forbidden, ( await denied.PostAsync( "/scheduler/worker/pause", null ) ).StatusCode );
+				HttpStatusCode.Forbidden, ( await denied.PostAsync( "/worker/pause", null ) ).StatusCode );
 
 		Assert.Equal(
-				HttpStatusCode.Forbidden, ( await denied.PostAsync( "/scheduler/worker/resume", null ) ).StatusCode );
+				HttpStatusCode.Forbidden, ( await denied.PostAsync( "/worker/resume", null ) ).StatusCode );
 
 		// The denied attempts must not have changed the worker.
 		Assert.False( _fixture.Worker.GetInfo().Paused );
@@ -73,12 +77,12 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 
 		using HttpClient client = _fixture.CreateClient( Operator );
 
-		HttpResponseMessage paused = await client.PostAsync( "/scheduler/worker/pause", null );
+		HttpResponseMessage paused = await client.PostAsync( "/worker/pause", null );
 
 		Assert.Equal( HttpStatusCode.OK, paused.StatusCode );
 		Assert.True( ( await SchedulingApiFixture.ReadAsync<WorkerInfo>( paused ) ).Paused );
 
-		HttpResponseMessage resumed = await client.PostAsync( "/scheduler/worker/resume", null );
+		HttpResponseMessage resumed = await client.PostAsync( "/worker/resume", null );
 
 		Assert.Equal( HttpStatusCode.OK, resumed.StatusCode );
 		Assert.False( ( await SchedulingApiFixture.ReadAsync<WorkerInfo>( resumed ) ).Paused );

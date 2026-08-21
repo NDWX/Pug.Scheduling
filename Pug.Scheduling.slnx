@@ -10,6 +10,7 @@
   <Project Path="src/Pug.Scheduling.Data.SQLite/Pug.Scheduling.Data.SQLite.csproj" />
   <Project Path="src/Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
   <Project Path="src/Pug.Scheduling.WebApi/Pug.Scheduling.WebApi.csproj" />
+  <Project Path="src/Pug.Scheduling.Worker.WebApi/Pug.Scheduling.Worker.WebApi.csproj" />
   <Project Path="src/Pug.Scheduling.DependencyInjection/Pug.Scheduling.DependencyInjection.csproj" />
   <Project Path="src/Pug.Scheduling.Leases/Pug.Scheduling.Leases.csproj" />
   <Project Path="src/Pug.Scheduling.Leases.Data.Abstractions/Pug.Scheduling.Leases.Data.Abstractions.csproj" />

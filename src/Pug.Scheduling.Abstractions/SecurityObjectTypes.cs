@@ -9,5 +9,9 @@ namespace Pug.Scheduling.Abstractions
 		// Worker instances are not domain-scoped: management grants are qualified by the worker's
 		// claimant identity only.
 		public static string SchedulerWorker => "SCHEDULER_WORKER";
+
+		// Grants an out-of-process worker's service principal the right to act as a given
+		// claimant identity against the execution coordinator; qualified by that claimant.
+		public static string ExecutionCoordinator => "EXECUTION_COORDINATOR";
 	}
 }

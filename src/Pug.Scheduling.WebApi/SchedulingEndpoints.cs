@@ -12,16 +12,18 @@ namespace Pug.Scheduling.WebApi;
 public static class SchedulingEndpoints
 {
 	/// <summary>
-	/// Maps schedule management API endpoints onto the given route builder.
-	/// The caller controls the base path — pass a <see cref="RouteGroupBuilder"/> from
-	/// <c>app.MapGroup("/schedules")</c> to mount under a prefix, or pass <c>app</c> directly to
-	/// mount at the application root.
+	/// Maps schedule management API endpoints, under their own <c>schedules/</c> prefix, onto the
+	/// given route builder: the host's routes are not assumed to be the scheduler's alone, and
+	/// the scheduler host serves the execution coordinator's routes alongside these. Pass
+	/// <c>app</c> to mount at the application root, or a <see cref="RouteGroupBuilder"/> from
+	/// <c>app.MapGroup("/your/prefix")</c> to mount the whole surface beneath a further prefix.
 	/// All endpoints require an authenticated caller; authorization (the schedule owner rule
 	/// followed by role-based ACLs) is enforced by <see cref="IScheduler"/> itself, so these
 	/// endpoints only translate its outcomes into HTTP results.
-	/// Worker management endpoints are mapped separately by
-	/// <see cref="SchedulerWorkerEndpoints.MapSchedulerWorkerEndpoints"/> — hosts that do not run
-	/// a worker simply do not map them.
+	/// Endpoints for externally hosted workers are mapped separately by
+	/// <see cref="ExecutionCoordinatorEndpoints.MapExecutionCoordinatorEndpoints"/>; worker
+	/// management endpoints live in <c>Pug.Scheduling.Worker.WebApi</c>, so a worker host need
+	/// not reference this package at all.
 	/// Swagger documentation is surfaced when the host configures <c>AddEndpointsApiExplorer()</c>
 	/// and <c>AddSwaggerGen()</c>.
 	/// </summary>
@@ -30,7 +32,7 @@ public static class SchedulingEndpoints
 		// Literal-segment routes are registered before parameterised routes of the same
 		// HTTP method to ensure the routing system resolves them correctly.
 
-		routes.MapGet( "", GetSchedules )
+		routes.MapGet( "schedules", GetSchedules )
 			.RequireAuthorization()
 			.WithName( "GetSchedules" )
 #if NET7_0_OR_GREATER
@@ -41,7 +43,7 @@ public static class SchedulingEndpoints
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapGet( "{identifier}", GetSchedule )
+		routes.MapGet( "schedules/{identifier}", GetSchedule )
 			.RequireAuthorization()
 			.WithName( "GetSchedule" )
 #if NET7_0_OR_GREATER
@@ -53,7 +55,7 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapGet( "{identifier}/runs", GetScheduleRuns )
+		routes.MapGet( "schedules/{identifier}/runs", GetScheduleRuns )
 			.RequireAuthorization()
 			.WithName( "GetScheduleRuns" )
 #if NET7_0_OR_GREATER
@@ -65,7 +67,7 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "", RegisterSchedule )
+		routes.MapPost( "schedules", RegisterSchedule )
 			.RequireAuthorization()
 			.WithName( "RegisterSchedule" )
 #if NET7_0_OR_GREATER
@@ -76,7 +78,7 @@ public static class SchedulingEndpoints
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "{identifier}/pause", PauseSchedule )
+		routes.MapPost( "schedules/{identifier}/pause", PauseSchedule )
 			.RequireAuthorization()
 			.WithName( "PauseSchedule" )
 #if NET7_0_OR_GREATER
@@ -88,7 +90,7 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "{identifier}/resume", ResumeSchedule )
+		routes.MapPost( "schedules/{identifier}/resume", ResumeSchedule )
 			.RequireAuthorization()
 			.WithName( "ResumeSchedule" )
 #if NET7_0_OR_GREATER
@@ -100,7 +102,7 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "{identifier}/run", RunScheduleNow )
+		routes.MapPost( "schedules/{identifier}/run", RunScheduleNow )
 			.RequireAuthorization()
 			.WithName( "RunScheduleNow" )
 #if NET7_0_OR_GREATER
@@ -114,7 +116,7 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPut( "{identifier}", UpdateScheduleDefinition )
+		routes.MapPut( "schedules/{identifier}", UpdateScheduleDefinition )
 			.RequireAuthorization()
 			.WithName( "UpdateScheduleDefinition" )
 #if NET7_0_OR_GREATER
@@ -126,7 +128,7 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapDelete( "{identifier}", DeleteSchedule )
+		routes.MapDelete( "schedules/{identifier}", DeleteSchedule )
 			.RequireAuthorization()
 			.WithName( "DeleteSchedule" )
 #if NET7_0_OR_GREATER
