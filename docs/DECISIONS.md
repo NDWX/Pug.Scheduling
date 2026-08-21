@@ -170,15 +170,13 @@ scheduler host serves more than one scheduling surface at once (user directive).
 - **Worker management endpoints are their own package** `Pug.Scheduling.Worker.WebApi` (user
   directive): a worker hosted out-of-process reaches the scheduler solely through the coordinator
   transport and must not have to reference packages it does not need.
-- **Authorization stays where it already is.** Schedule endpoints perform none of their own — the
-  owner-rule-then-ACL check lives in `Scheduler`, so the HTTP surface only maps outcomes:
-  `NotAuthorized` → 403, `UnknownScheduleException`/`UnknownRunException` → 404,
-  `ArgumentException` → 400 `BadRequestResultInfo`. The other two surfaces are trust boundaries
-  their facades do not guard, so they authorize explicitly and with no owner exemption:
-  `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`, and
-  `CoordinatorSecurityOperations` on `SecurityObjectTypes.ExecutionCoordinator` — both **qualified
-  by claimant identity**, so one worker's credentials cannot manage, claim, renew or complete as
-  another.
+- **Authorization stays with the facades** (see D16). Schedule and coordinator endpoints perform
+  none of their own; they require an authenticated caller and map outcomes: `NotAuthorized` → 403,
+  `UnknownScheduleException`/`UnknownRunException` → 404, `ArgumentException` → 400
+  `BadRequestResultInfo`. Worker management endpoints remain the one exception —
+  `ISchedulerWorker` is a local control surface with no facade behind it — so they check
+  `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`, qualified by claimant, with
+  no owner exemption.
 - **`ISchedulerWorker` moved to Abstractions and `WorkerInfo` to Models** (from
   `Pug.Scheduling.Worker`): both WebApi packages multi-target `net6.0;net8.0;net10.0` and cannot
   reference the net10.0-only worker implementation. The interface stays synchronous — it manages
@@ -190,6 +188,25 @@ scheduler host serves more than one scheduling surface at once (user directive).
 - Query parameters the handler validates are declared nullable so omission reaches the handler
   and yields a structured `BadRequestResultInfo`, instead of model binding failing with an empty
   400 body.
+
+## D16 — The execution coordinator authorizes its own callers (user correction)
+
+Authorization for `IExecutionCoordinator` lives **inside `ExecutionCoordinator`**, not in the
+coordinator endpoints where it was first placed. The coordinator is the worker's only surface
+regardless of hosting model (D5), so putting the check in the HTTP layer would have held remote
+workers to grants that in-process workers bypass entirely — the inconsistency D5 exists to
+prevent. Each operation requires its `CoordinatorSecurityOperations` grant on
+`SecurityObjectTypes.ExecutionCoordinator` qualified by the **claimant identity being acted as**
+(`ResourceQualifiers.ExecutionCoordinator`), so one worker's credentials cannot claim, renew, or
+complete runs as another. There is no owner rule: execution is an operator concern, not the
+schedule owner's.
+
+**Consequence for hosts:** an in-process `SchedulerWorker` now needs a security principal of its
+own — its polls run under whatever the host's `ISecurityManager` reports ambiently, and a
+`BackgroundService` has no request to inherit one from. A worker host must establish a service
+principal (granted `CLAIM_JOBS`/`RENEW_CLAIM`/`REPORT_COMPLETION` on its claimant identity) around
+the worker's calls. Unresolved in this repo — the mechanism belongs to the host's
+`ISecurityManager` implementation, and Phase 3's owner-impersonation work covers the same ground.
 
 ## Verification conventions
 
@@ -203,7 +220,7 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
 
 - **1a Models + Abstractions — DONE**  · **1b Data.Abstractions — DONE** · **1c Leases — DONE**
   · **1d implementation (core/data/worker/DI + 44 tests) — DONE**
-  · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 73
+  · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 74
   total) — DONE**
 - **1f — NEXT**: `.Client` (Pug.HttpApiClient) over the same routes — covering **both**
   `IScheduler` and `IExecutionCoordinator`, the latter being what an out-of-process worker binds

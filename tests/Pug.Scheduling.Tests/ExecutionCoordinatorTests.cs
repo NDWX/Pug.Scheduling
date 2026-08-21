@@ -1,3 +1,4 @@
+using Pug.Application.Security;
 using Pug.Application.Data.Extensions;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
@@ -23,10 +24,14 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 		_scheduleDatabase = scheduleDatabase;
 		_leaseProvider = new DatabaseExecutionLeaseProvider( leaseDatabase.ApplicationData );
 
+		// The coordinator authorizes every operation against the claimant identity; these tests
+		// cover the state machine, so the grant is unconditional here — CoordinatorAuthorization
+		// covers denial.
 		_coordinator = new ExecutionCoordinator(
 				new SequentialIdGenerator( "run" ),
 				scheduleDatabase.ApplicationData,
 				_leaseProvider,
+				SecurityManagerFactory.CreateAlwaysAuthorized( Claimant ),
 				new ExecutionCoordinatorOptions() );
 	}
 
@@ -151,6 +156,7 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 				new SequentialIdGenerator( "run2" ),
 				_scheduleDatabase.ApplicationData,
 				_leaseProvider,
+				SecurityManagerFactory.CreateAlwaysAuthorized( "worker-b" ),
 				new ExecutionCoordinatorOptions() );
 
 		IEnumerable<ClaimedJob>[] claims = await Task.WhenAll(
@@ -342,5 +348,34 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 		await Assert.ThrowsAsync<UnknownRunException>(
 				() => _coordinator.ReportCompletionAsync(
 						"missing", Claimant, RunResults.Succeeded, new JobOutcome { Successful = true } ) );
+	}
+
+	[Fact]
+	public async Task UngrantedClaimantIsRefusedEveryOperation()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		// Authorization belongs to the coordinator, not to any hosting surface: an in-process
+		// worker is held to the same grants as one calling in over a transport.
+		ExecutionCoordinator denied = new(
+				new SequentialIdGenerator( "run-denied" ),
+				_scheduleDatabase.ApplicationData,
+				_leaseProvider,
+				SecurityManagerFactory.CreateAlwaysDenied( "unauthorized-worker" ),
+				new ExecutionCoordinatorOptions() );
+
+		await Assert.ThrowsAsync<NotAuthorized>( () => denied.ClaimDueJobsAsync( "unauthorized-worker", 10 ) );
+
+		// The refused claim must not have leased the schedule away from a legitimate worker.
+		ClaimedJob job = Assert.Single(
+				await _coordinator.ClaimDueJobsAsync( Claimant, 10 ), claimed => claimed.Context.Schedule == schedule );
+
+		await Assert.ThrowsAsync<NotAuthorized>(
+				() => denied.RenewClaimAsync( job.Context.Run, "unauthorized-worker" ) );
+
+		await Assert.ThrowsAsync<NotAuthorized>(
+				() => denied.ReportCompletionAsync(
+						job.Context.Run, "unauthorized-worker", RunResults.Succeeded,
+						new JobOutcome { Successful = true } ) );
 	}
 }

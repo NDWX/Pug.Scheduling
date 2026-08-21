@@ -114,8 +114,10 @@ public class ExecutionCoordinatorEndpointsTests : IClassFixture<SchedulingApiFix
 
 		BadRequestResultInfo error = await SchedulingApiFixture.ReadAsync<BadRequestResultInfo>( response );
 
+		// The rejection comes from the coordinator itself — the endpoint reports its parameter
+		// name, not the request property's.
 		Assert.Equal( "INVALID_ARGUMENT", error.Type );
-		Assert.Equal( nameof(JobRunClaimRequest.MaximumJobs), error.RequestArgument );
+		Assert.Equal( "maximumJobs", error.RequestArgument );
 	}
 
 	[Fact]

@@ -41,11 +41,14 @@ dotnet test tests/Pug.Scheduling.Tests
 - Handlers are third-party: escaping exceptions / null returns become unsuccessful `JobOutcome`s;
   timeouts are worker-enforced; claim loss or shutdown ⇒ abandon without reporting.
 - All times UTC; cron in the recurrence's IANA time zone via Cronos.
-- Schedule endpoints authorize nothing themselves — `Scheduler` does; they only map
-  `NotAuthorized`/`Unknown*Exception`/`ArgumentException` to 403/404/400. The worker and
-  coordinator endpoints are the exception — their facades guard nothing — so they check
-  `WorkerSecurityOperations` / `CoordinatorSecurityOperations` qualified by **claimant identity**,
-  with no owner exemption.
+- Endpoints authorize nothing themselves — the facades do. `Scheduler` runs owner-rule-then-ACL;
+  `ExecutionCoordinator` checks `CoordinatorSecurityOperations` qualified by **claimant identity**
+  (never in the endpoints: an in-process worker must be held to the same grants as a remote one).
+  Endpoints only require authentication and map `NotAuthorized`/`Unknown*Exception`/
+  `ArgumentException` to 403/404/400. The lone exception is worker management, whose
+  `ISchedulerWorker` has no facade behind it.
+- A worker host must supply the worker a security principal granted on its claimant identity;
+  `BackgroundService` polls have no ambient one.
 - Coordinator wire contracts (`JobRunClaimRequest`, `JobRunCompletion`) live in Models, never in
   the WebApi: a worker host's client must not pull in the server-side package.
 

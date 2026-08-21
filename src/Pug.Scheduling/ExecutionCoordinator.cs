@@ -1,5 +1,6 @@
 using Pug.Application.Data;
 using Pug.Application.Data.Extensions;
+using Pug.Application.Security;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.Models;
@@ -10,16 +11,24 @@ namespace Pug.Scheduling
 	// policy lives. Workers only see IExecutionCoordinator; exclusivity is arbitrated through
 	// IExecutionLeaseProvider, never through the schedule store, so concurrent coordinator
 	// instances may read overlapping due candidates and race safely for the lease.
+	//
+	// Authorization lives here rather than in any hosting surface: the coordinator is the
+	// worker's only surface regardless of hosting model, so an in-process worker is held to the
+	// same grants as one calling in over a transport. Every operation requires the corresponding
+	// CoordinatorSecurityOperations grant on the claimant identity being acted as, which is what
+	// keeps one worker from claiming, renewing, or completing runs as another.
 	public class ExecutionCoordinator : IExecutionCoordinator
 	{
 		private readonly IdentifierGenerator _identifierGenerator;
 		private readonly IApplicationData<IDataSession> _applicationDataProvider;
 		private readonly IExecutionLeaseProvider _leaseProvider;
+		private readonly ISecurityManager _securityManager;
 		private readonly ExecutionCoordinatorOptions _options;
 
 		public ExecutionCoordinator( IdentifierGenerator identifierGenerator,
 									IApplicationData<IDataSession> applicationDataProvider,
 									IExecutionLeaseProvider leaseProvider,
+									ISecurityManager securityManager,
 									ExecutionCoordinatorOptions options )
 		{
 			_identifierGenerator = identifierGenerator ??
@@ -30,6 +39,8 @@ namespace Pug.Scheduling
 
 			_leaseProvider = leaseProvider ?? throw new ArgumentNullException( nameof(leaseProvider) );
 
+			_securityManager = securityManager ?? throw new ArgumentNullException( nameof(securityManager) );
+
 			_options = options ?? throw new ArgumentNullException( nameof(options) );
 		}
 
@@ -39,12 +50,32 @@ namespace Pug.Scheduling
 				throw new ArgumentException( "Value cannot be null or whitespace.", nameof(claimant) );
 		}
 
+		// Grants are qualified by the claimant identity being acted as; there is no owner rule
+		// here — execution is an operator concern, not the schedule owner's.
+		private async Task CheckAuthorizationAsync( string operation, string claimant )
+		{
+			bool isAuthorized = await _securityManager.CurrentPrincipal
+													.IsAuthorizedAsync(
+															new Dictionary<string, string>( 0 ),
+															operation,
+															ResourceQualifiers.ExecutionCoordinator( claimant ),
+															string.Empty
+														)
+													.ConfigureAwait( false );
+
+			if( !isAuthorized )
+				throw new NotAuthorized();
+		}
+
 		public async Task<IEnumerable<ClaimedJob>> ClaimDueJobsAsync( string claimant, int maximumJobs )
 		{
 			ValidateClaimant( claimant );
 
 			if( maximumJobs < 1 )
 				throw new ArgumentException( "At least one job must be claimable.", nameof(maximumJobs) );
+
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.ClaimJobs, claimant )
+				.ConfigureAwait( false );
 
 			IEnumerable<ScheduleInfo> candidates =
 				await _applicationDataProvider.ExecuteAsync(
@@ -264,6 +295,9 @@ namespace Pug.Scheduling
 			if( string.IsNullOrWhiteSpace( run ) )
 				throw new ArgumentException( "Value cannot be null or whitespace.", nameof(run) );
 
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.RenewClaim, claimant )
+				.ConfigureAwait( false );
+
 			ScheduleRun runRecord =
 				await _applicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
@@ -289,6 +323,9 @@ namespace Pug.Scheduling
 			// SKIPPED is the coordinator's own classification; workers report executed runs.
 			if( result != RunResults.Succeeded && result != RunResults.Failed && result != RunResults.TimedOut )
 				throw new ArgumentException( $"Unknown or non-reportable run result '{result}'.", nameof(result) );
+
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.ReportCompletion, claimant )
+				.ConfigureAwait( false );
 
 			ScheduleRun runRecord =
 				await _applicationDataProvider.ExecuteAsync(

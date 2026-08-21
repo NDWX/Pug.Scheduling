@@ -48,6 +48,7 @@ namespace Pug.Scheduling.DependencyInjection
 							identifierGenerator,
 							provider.GetRequiredService<IApplicationData<IDataSession>>(),
 							provider.GetRequiredService<IExecutionLeaseProvider>(),
+							provider.GetRequiredService<ISecurityManager>(),
 							coordinatorOptions ?? new ExecutionCoordinatorOptions()
 						)
 				);

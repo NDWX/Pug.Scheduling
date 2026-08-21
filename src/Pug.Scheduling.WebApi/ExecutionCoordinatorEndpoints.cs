@@ -18,11 +18,11 @@ public static class ExecutionCoordinatorEndpoints
 	/// The contract is <see cref="IExecutionCoordinator"/> unchanged — due-ness, claim semantics,
 	/// misfire handling, retry scheduling, and next-occurrence computation stay behind it, and a
 	/// remote worker still never reaches the data backend.
-	/// These endpoints are the trust boundary a remote worker crosses, so unlike the schedule
-	/// endpoints they authorize explicitly: the caller must hold the relevant
-	/// <see cref="CoordinatorSecurityOperations"/> grant on
-	/// <see cref="SecurityObjectTypes.ExecutionCoordinator"/> qualified by the claimant identity
-	/// it is acting as.
+	/// Authorization is the coordinator's own, not these endpoints': every operation requires the
+	/// relevant <see cref="CoordinatorSecurityOperations"/> grant on the claimant identity being
+	/// acted as, enforced inside <see cref="IExecutionCoordinator"/> so an in-process worker is
+	/// held to exactly the same rules. These endpoints only require an authenticated caller and
+	/// translate the outcome into HTTP results.
 	/// </summary>
 	public static IEndpointRouteBuilder MapExecutionCoordinatorEndpoints( this IEndpointRouteBuilder routes )
 	{
@@ -66,27 +66,19 @@ public static class ExecutionCoordinatorEndpoints
 		return routes;
 	}
 
-	// Worker grants are qualified by the claimant identity being acted as, so one worker's
-	// credentials cannot claim, renew, or complete runs as another.
-	private static async Task<bool> IsAuthorizedAsync( ISecurityManager securityManager, string operation,
-													string claimant ) =>
-		await securityManager.CurrentPrincipal
-							.IsAuthorizedAsync(
-									new Dictionary<string, string>( 0 ),
-									operation,
-									new NounQualifier
-									{
-										Type = SecurityObjectTypes.ExecutionCoordinator,
-										Identifier = claimant
-									},
-									string.Empty
-								)
-							.ConfigureAwait( false );
+	private static IResult InvalidArgument( ArgumentException exception ) =>
+		Results.BadRequest(
+				new BadRequestResultInfo
+				{
+					Type = "INVALID_ARGUMENT",
+					RequestArgument = exception.ParamName ?? string.Empty,
+					Message = exception.Message
+				}
+			);
 
 	private static async Task<IResult> ClaimDueJobs(
 		[FromBody] JobRunClaimRequest? request,
-		[FromServices] IExecutionCoordinator coordinator,
-		[FromServices] ISecurityManager securityManager )
+		[FromServices] IExecutionCoordinator coordinator )
 	{
 		if( request is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(request) ) );
@@ -95,57 +87,57 @@ public static class ExecutionCoordinatorEndpoints
 			return Results.BadRequest(
 					new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(request.Claimant) ) );
 
-		if( request.MaximumJobs < 1 )
-			return Results.BadRequest(
-					new BadRequestResultInfo( "INVALID_ARGUMENT", nameof(request.MaximumJobs),
-											"At least one job must be requested." ) );
+		try
+		{
+			IEnumerable<ClaimedJob> claimed =
+				await coordinator.ClaimDueJobsAsync( request.Claimant, request.MaximumJobs )
+								.ConfigureAwait( false );
 
-		if( !await IsAuthorizedAsync( securityManager, CoordinatorSecurityOperations.ClaimJobs, request.Claimant )
-				.ConfigureAwait( false ) )
+			return Results.Ok( claimed );
+		}
+		catch( NotAuthorized )
+		{
 			return Results.Forbid();
-
-		IEnumerable<ClaimedJob> claimed =
-			await coordinator.ClaimDueJobsAsync( request.Claimant, request.MaximumJobs ).ConfigureAwait( false );
-
-		return Results.Ok( claimed );
+		}
+		catch( ArgumentException e )
+		{
+			return InvalidArgument( e );
+		}
 	}
 
 	private static async Task<IResult> RenewClaim(
 		[FromRoute] string run,
 		[FromQuery] string? worker,
-		[FromServices] IExecutionCoordinator coordinator,
-		[FromServices] ISecurityManager securityManager )
+		[FromServices] IExecutionCoordinator coordinator )
 	{
 		if( string.IsNullOrEmpty( worker ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(worker) ) );
 
-		if( !await IsAuthorizedAsync( securityManager, CoordinatorSecurityOperations.RenewClaim, worker )
-				.ConfigureAwait( false ) )
+		try
+		{
+			return Results.Ok( await coordinator.RenewClaimAsync( run, worker ).ConfigureAwait( false ) );
+		}
+		catch( NotAuthorized )
+		{
 			return Results.Forbid();
-
-		return Results.Ok( await coordinator.RenewClaimAsync( run, worker ).ConfigureAwait( false ) );
+		}
+		catch( ArgumentException e )
+		{
+			return InvalidArgument( e );
+		}
 	}
 
 	private static async Task<IResult> ReportCompletion(
 		[FromRoute] string run,
 		[FromQuery] string? worker,
 		[FromBody] JobRunCompletion? completion,
-		[FromServices] IExecutionCoordinator coordinator,
-		[FromServices] ISecurityManager securityManager )
+		[FromServices] IExecutionCoordinator coordinator )
 	{
 		if( string.IsNullOrEmpty( worker ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(worker) ) );
 
 		if( completion is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(completion) ) );
-
-		if( string.IsNullOrEmpty( completion.Result ) )
-			return Results.BadRequest(
-					new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(completion.Result) ) );
-
-		if( !await IsAuthorizedAsync( securityManager, CoordinatorSecurityOperations.ReportCompletion, worker )
-				.ConfigureAwait( false ) )
-			return Results.Forbid();
 
 		try
 		{
@@ -154,10 +146,18 @@ public static class ExecutionCoordinatorEndpoints
 
 			return Results.Ok();
 		}
+		catch( NotAuthorized )
+		{
+			return Results.Forbid();
+		}
 		catch( UnknownRunException )
 		{
 			// Includes runs whose schedule was deleted mid-flight — history goes with the schedule.
 			return Results.NotFound();
+		}
+		catch( ArgumentException e )
+		{
+			return InvalidArgument( e );
 		}
 	}
 }

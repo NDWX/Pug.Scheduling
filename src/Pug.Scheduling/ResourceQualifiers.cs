@@ -17,5 +17,13 @@ namespace Pug.Scheduling
 			Type = SecurityObjectTypes.Schedule,
 			Identifier = identifier
 		};
+
+		// Execution is not domain-scoped: a worker serves every domain the scheduler hosts, so
+		// coordinator grants are qualified by the claimant identity being acted as.
+		public static NounQualifier ExecutionCoordinator( string claimant ) => new NounQualifier
+		{
+			Type = SecurityObjectTypes.ExecutionCoordinator,
+			Identifier = claimant
+		};
 	}
 }
