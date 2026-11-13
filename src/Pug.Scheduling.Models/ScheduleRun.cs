@@ -129,5 +129,18 @@ namespace Pug.Scheduling.Models
 			set;
 #endif
 		}
+
+		// The lease holder ("{claimant}/{worker}") the run is recorded as executing under; a
+		// completion is accepted only from it. Null for runs recorded before this was tracked.
+		[DataMember]
+		public string ClaimedBy
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
 	}
 }

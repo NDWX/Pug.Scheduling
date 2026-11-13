@@ -65,7 +65,8 @@ public static class ExecutionCoordinatorEndpoints
 			.Produces( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
-			.Produces( StatusCodes.Status404NotFound );
+			.Produces( StatusCodes.Status404NotFound )
+			.Produces( StatusCodes.Status409Conflict );
 
 		return routes;
 	}
@@ -189,6 +190,12 @@ public static class ExecutionCoordinatorEndpoints
 		{
 			// Includes runs whose schedule was deleted mid-flight — history goes with the schedule.
 			return Results.NotFound();
+		}
+		catch( ClaimNotHeldException )
+		{
+			// The reporter cannot be verified to hold the run: adopted by a peer, never claimed
+			// by it, or already finished. Nothing was written.
+			return Results.Conflict();
 		}
 		catch( ArgumentException e )
 		{

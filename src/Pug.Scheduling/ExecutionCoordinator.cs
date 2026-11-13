@@ -249,6 +249,14 @@ namespace Pug.Scheduling
 			{
 				runIdentifier = latestRun.Identifier;
 
+				// The claim on the run moves to the adopter; the previous holder's completion is
+				// refused from here on.
+				await _applicationDataProvider.PerformAsync(
+							async ( session, context ) =>
+								await session.ClaimRunAsync( context.run, context.holder ).ConfigureAwait( false ),
+							context: new { run = runIdentifier, holder }
+						).ConfigureAwait( false );
+
 				_logger.LogInformation(
 						"Claimant {Claimant} worker {Worker} adopted unfinished run {Run} of schedule {Schedule} " +
 						"(occurrence {ScheduledFor}, attempt {Attempt}).",
@@ -273,7 +281,8 @@ namespace Pug.Scheduling
 					ScheduledFor = scheduledFor,
 					Started = now,
 					Attempt = state.Attempt,
-					Trigger = trigger
+					Trigger = trigger,
+					ClaimedBy = holder
 				};
 
 				// The run request is consumed by the claim that honors it, in the same
@@ -340,7 +349,8 @@ namespace Pug.Scheduling
 				Finished = now,
 				Attempt = 0,
 				Trigger = RunTriggers.Misfire,
-				Result = RunResults.Skipped
+				Result = RunResults.Skipped,
+				ClaimedBy = holder
 			};
 
 			RunSummary lastRun = new() { Started = now, Finished = now, Result = RunResults.Skipped };
@@ -434,16 +444,51 @@ namespace Pug.Scheduling
 			if( schedule is null )
 				throw new UnknownScheduleException( runRecord.Schedule );
 
-			// Diagnostic only: a completion from a worker whose claim lapsed is still recorded, as
-			// it always has been — the run did execute — but a peer may be re-executing the
-			// occurrence, which an operator needs to be able to see.
-			ExecutionLease lease = await _leaseProvider.GetAsync( schedule.Identifier ).ConfigureAwait( false );
-
-			if( lease is null || lease.ClaimedBy != holder )
+			// A completion is accepted only if the reporter can be verified to hold the run. A
+			// finished run is refused outright so a duplicate report cannot complete it or
+			// advance the schedule again.
+			if( runRecord.Finished is not null )
+			{
 				_logger.LogWarning(
-						"Completion of run {Run} of schedule {Schedule} reported by claimant {Claimant} worker {Worker}, " +
-						"which no longer holds the claim (held by {Holder}).",
+						"Refused completion of run {Run} of schedule {Schedule} reported by claimant {Claimant} " +
+						"worker {Worker}: the run has already finished.",
+						run, schedule.Identifier, claimant, worker );
+
+				throw new ClaimNotHeldException( run );
+			}
+
+			ExecutionLease lease = await _leaseProvider.GetAsync( schedule.Identifier ).ConfigureAwait( false );
+			bool leaseHeld = lease is not null && lease.ClaimedBy == holder;
+
+			if( runRecord.ClaimedBy is not null )
+			{
+				if( runRecord.ClaimedBy != holder )
+				{
+					_logger.LogWarning(
+							"Refused completion of run {Run} of schedule {Schedule} reported by claimant {Claimant} " +
+							"worker {Worker}: the run is recorded as claimed by {Holder}.",
+							run, schedule.Identifier, claimant, worker, runRecord.ClaimedBy );
+
+					throw new ClaimNotHeldException( run );
+				}
+
+				if( !leaseHeld )
+					_logger.LogWarning(
+							"Claimant {Claimant} worker {Worker} reported completion of run {Run} of schedule {Schedule} " +
+							"after its claim had lapsed (held by {LeaseHolder}); accepted because the run is still " +
+							"recorded as its own.",
+							claimant, worker, run, schedule.Identifier, lease?.ClaimedBy ?? "nobody" );
+			}
+			else if( !leaseHeld )
+			{
+				// A run recorded before the holder was tracked: the current lease is the only evidence.
+				_logger.LogWarning(
+						"Refused completion of legacy run {Run} of schedule {Schedule} reported by claimant {Claimant} " +
+						"worker {Worker}, which does not hold the claim (held by {LeaseHolder}).",
 						run, schedule.Identifier, claimant, worker, lease?.ClaimedBy ?? "nobody" );
+
+				throw new ClaimNotHeldException( run );
+			}
 
 			DateTime now = DateTime.UtcNow;
 
@@ -487,21 +532,43 @@ namespace Pug.Scheduling
 
 			RunSummary lastRun = new() { Started = runRecord.Started, Finished = now, Result = result };
 
-			await _applicationDataProvider.PerformAsync(
-						async ( session, context ) =>
-						{
-							await session.CompleteRunAsync(
-											context.run, context.now, context.result, context.outcome
-										)
-										.ConfigureAwait( false );
+			// The completing update re-checks the holder, so an adoption that lands after the checks
+			// above still refuses this completion rather than overwriting the adopter's run.
+			bool completed = await _applicationDataProvider.ExecuteAsync(
+									async ( session, context ) =>
+									{
+										if( !await session.CompleteRunAsync(
+													context.run, context.holder, context.now, context.result,
+													context.outcome
+												)
+												.ConfigureAwait( false ) )
+											return false;
 
-							await session.RecordOccurrenceCompletionAsync(
-											context.schedule, context.attempt, context.nextRun, context.lastRun
-										)
-										.ConfigureAwait( false );
-						},
-						context: new { run, now, result, outcome, schedule = schedule.Identifier, attempt, nextRun, lastRun }
-					).ConfigureAwait( false );
+										await session.RecordOccurrenceCompletionAsync(
+														context.schedule, context.attempt, context.nextRun,
+														context.lastRun
+													)
+													.ConfigureAwait( false );
+
+										return true;
+									},
+									context: new
+									{
+										run, holder, now, result, outcome, schedule = schedule.Identifier, attempt,
+										nextRun, lastRun
+									}
+								).ConfigureAwait( false );
+
+			if( !completed )
+			{
+				_logger.LogWarning(
+						"Refused completion of run {Run} of schedule {Schedule} reported by claimant {Claimant} " +
+						"worker {Worker}: the run finished or was adopted by another worker while the completion " +
+						"was being recorded.",
+						run, schedule.Identifier, claimant, worker );
+
+				throw new ClaimNotHeldException( run );
+			}
 
 			await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
 

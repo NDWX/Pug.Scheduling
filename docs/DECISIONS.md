@@ -193,8 +193,8 @@ scheduler host serves more than one scheduling surface at once (user directive).
   transport and must not have to reference packages it does not need.
 - **Authorization stays with the facades** (see D16). Schedule and coordinator endpoints perform
   none of their own; they require an authenticated caller and map outcomes: `NotAuthorized` → 403,
-  `UnknownScheduleException`/`UnknownRunException` → 404, `ArgumentException` → 400
-  `BadRequestResultInfo`. Worker management endpoints remain the one exception —
+  `UnknownScheduleException`/`UnknownRunException` → 404, `ClaimNotHeldException` → 409 (completion
+  only), `ArgumentException` → 400 `BadRequestResultInfo`. Worker management endpoints remain the one exception —
   `ISchedulerWorker` is a local control surface with no facade behind it — so they check
   `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`, qualified by claimant, with
   no owner exemption.
@@ -235,11 +235,23 @@ corollary is that worker numbers must be unique within a claimant across live pr
 `ExecutionCoordinator` logs its transitions through `ILogger<ExecutionCoordinator>` with structured
 `{Claimant}`, `{Worker}`, `{Schedule}`, `{Run}`, `{ScheduledFor}`, `{Attempt}`: claims, adoptions,
 completions, retries and misfire skips at Information; lost lease races, no due work and computed
-next occurrences at Debug; authorization denials, renewals or completions from a worker that no
-longer holds the claim, and stale due candidates at Warning; a failure preparing a claimed job at
-Error, before its lease is released and the error rethrown. A completion from a worker that no
-longer holds the claim is still recorded, as before — the warning makes the possible double
-execution visible, it does not refuse it.
+next occurrences at Debug; authorization denials, renewals from a worker that no longer holds the
+claim, refused or lapsed-claim completions, and stale due candidates at Warning; a failure
+preparing a claimed job at Error, before its lease is released and the error rethrown.
+
+**A completion is accepted only if the reporter can be verified to hold the run.** The run records
+its holder (`ScheduleRun.ClaimedBy`, `"{claimant}/{worker}"`), set when the run is inserted
+(including a misfire-SKIP run) and transferred when a later claim adopts the unfinished run (D9).
+`ReportCompletionAsync` then: refuses a run that is already finished (a duplicate report must not
+re-complete it or advance the schedule again); accepts a report from the recorded holder even if
+its lease has lapsed, since the run is still recorded as its own (logged as a warning); refuses a
+report from anyone else; and, for a legacy row with no recorded holder, accepts only if the
+current lease holder is the reporter. Every refusal logs a warning and throws
+`ClaimNotHeldException` before any write (409 over HTTP, mapped back by the client). The
+completing update repeats the check in the same statement (`where finished is null and claimedBy =
+holder`), so an adoption that lands between the checks and the write still refuses the completion
+instead of overwriting the adopter's run. `SchedulerWorker` already logs and swallows a failed
+completion report.
 
 **A call arriving with no principal at all is trusted and skips the check** (user directive).
 Every endpoint in front of the coordinator requires an authenticated caller before dispatch, so a

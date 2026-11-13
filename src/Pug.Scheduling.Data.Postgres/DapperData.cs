@@ -88,6 +88,11 @@ namespace Pug.Scheduling.Data.Postgres
 									"Schedule table job-type due index", Empty,
 									@"create index ixScheduleJobTypeDue on schedule(jobType, nextRun) where enabled and not paused;",
 									@"drop index ixScheduleJobTypeDue;"
+								),
+							new UpgradeScript(
+									"Schedule table job-type due index — run claimant", Empty,
+									@"alter table scheduleRun add column claimedBy character varying;",
+									@"alter table scheduleRun drop column claimedBy;"
 								)
 						}
 					)

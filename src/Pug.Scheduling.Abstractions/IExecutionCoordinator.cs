@@ -33,7 +33,9 @@ namespace Pug.Scheduling.Abstractions
 		// applies the schedule's RetryPolicy when the outcome is unsuccessful, and computes the
 		// schedule's next occurrence. result is a well-known RunResults value — the worker's
 		// classification of the run; outcome is the job handler's report, null for runs that
-		// never reached the handler (e.g. SKIPPED).
+		// never reached the handler (e.g. SKIPPED). Throws ClaimNotHeldException, writing nothing,
+		// when the reporter cannot be verified to hold the claim on the run (it was adopted by
+		// another worker, never claimed by this one, or has already finished).
 		Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome );
 	}
 }

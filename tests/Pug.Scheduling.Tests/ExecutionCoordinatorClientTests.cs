@@ -148,6 +148,23 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	}
 
 	[Fact]
+	public async Task CompletionFromAWorkerThatDoesNotHoldTheRunSurfacesTheAbstractionsException()
+	{
+		await RegisterDueScheduleAsync( "Completed by a stranger" );
+
+		ClaimedJob? job = await _coordinator.ClaimDueJobAsync( Worker, _worker, null );
+
+		Assert.NotNull( job );
+
+		ClaimNotHeldException exception = await Assert.ThrowsAsync<ClaimNotHeldException>(
+				() => _coordinator.ReportCompletionAsync(
+						job.Context.Run, Worker, _worker + 1000, RunResults.Succeeded,
+						new JobOutcome { Successful = true } ) );
+
+		Assert.Equal( job.Context.Run, exception.Run );
+	}
+
+	[Fact]
 	public async Task ActingAsAnotherClaimantSurfacesAsNotAuthorized()
 	{
 		IExecutionCoordinator impersonating =

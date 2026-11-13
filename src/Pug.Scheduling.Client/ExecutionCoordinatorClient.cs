@@ -71,13 +71,20 @@ public class ExecutionCoordinatorClient : ApiClient, IExecutionCoordinator
 		ApiFailures.TranslateAsync(
 				async () =>
 				{
-					using HttpResponseMessage response =
-						await HttpClient.PostAsync(
-										RunPath( run, "completion" ),
-										new JobRunCompletion { Result = result, Outcome = outcome },
-										queries: CallerQuery( claimant, worker )
-									)
-									.ConfigureAwait( false );
+					try
+					{
+						using HttpResponseMessage response =
+							await HttpClient.PostAsync(
+											RunPath( run, "completion" ),
+											new JobRunCompletion { Result = result, Outcome = outcome },
+											queries: CallerQuery( claimant, worker )
+										)
+										.ConfigureAwait( false );
+					}
+					catch( HttpApiRequestException exception ) when( exception.ResponseStatusCode == HttpStatusCode.Conflict )
+					{
+						throw new ClaimNotHeldException( run );
+					}
 				},
 				() => new UnknownRunException( run )
 			);

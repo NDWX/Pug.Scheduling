@@ -89,6 +89,11 @@ namespace Pug.Scheduling.Data.SQLite
 									"Schedule table job-type due index", Empty,
 									@"create index ixScheduleJobTypeDue on schedule(jobType, nextRun) where enabled = 1 and paused = 0;",
 									@"drop index ixScheduleJobTypeDue;"
+								),
+							new UpgradeScript(
+									"Schedule table job-type due index — run claimant", Empty,
+									@"alter table scheduleRun add column claimedBy text;",
+									@"alter table scheduleRun drop column claimedBy;"
 								)
 						}
 					)

@@ -540,4 +540,146 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 
 		Assert.Equal( RunResults.Succeeded, run.Result );
 	}
+
+	[Fact]
+	public async Task ClaimRecordsAndAdoptionTransfersTheRunHolder()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		ClaimedJob original = await ClaimSingleAsync( schedule, worker: 1 );
+
+		Assert.Equal( $"{Claimant}/1", Assert.Single( await GetRunsAsync( schedule ) ).ClaimedBy );
+
+		// The claim lapses and a peer worker adopts the unfinished run.
+		await _leaseProvider.ReleaseAsync( schedule, $"{Claimant}/1" );
+
+		ClaimedJob adopted = await ClaimSingleAsync( schedule, worker: 2 );
+
+		Assert.Equal( original.Context.Run, adopted.Context.Run );
+		Assert.Equal( $"{Claimant}/2", Assert.Single( await GetRunsAsync( schedule ) ).ClaimedBy );
+	}
+
+	// The coordinator checks the holder before writing; this is the store-level guard that keeps a
+	// concurrent adoption between that check and the write from being overwritten.
+	[Fact]
+	public async Task RunCompletionOnlyUpdatesAnUnfinishedRunOfTheGivenHolder()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		Task<bool> CompleteAsync( string holder ) =>
+			_scheduleDatabase.ApplicationData.ExecuteAsync(
+					async ( session, context ) =>
+						await session.CompleteRunAsync(
+										context.run, context.holder, DateTime.UtcNow, RunResults.Succeeded,
+										new JobOutcome { Successful = true }
+									)
+									.ConfigureAwait( false ),
+					context: new { run = job.Context.Run, holder }
+				);
+
+		Assert.False( await CompleteAsync( $"{Claimant}/2" ) );
+		Assert.Null( Assert.Single( await GetRunsAsync( schedule ) ).Finished );
+
+		Assert.True( await CompleteAsync( $"{Claimant}/1" ) );
+		Assert.False( await CompleteAsync( $"{Claimant}/1" ) );
+	}
+
+	[Fact]
+	public async Task MisfireSkipRunRecordsItsHolder()
+	{
+		string schedule = await InsertScheduleAsync(
+				DateTime.UtcNow.AddMinutes( -10 ), misfireHandling: MisfireHandlings.Skip );
+
+		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 5, _jobType ) );
+
+		Assert.Equal( $"{Claimant}/5", Assert.Single( await GetRunsAsync( schedule ) ).ClaimedBy );
+	}
+
+	[Fact]
+	public async Task LapsedClaimNotAdoptedStillAcceptsTheRecordedHolder()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		ClaimedJob job = await ClaimSingleAsync( schedule );
+
+		await _leaseProvider.ReleaseAsync( schedule, $"{Claimant}/1" );
+
+		await _coordinator.ReportCompletionAsync(
+				job.Context.Run, Claimant, 1, RunResults.Succeeded, new JobOutcome { Successful = true } );
+
+		ScheduleRun run = Assert.Single( await GetRunsAsync( schedule ) );
+
+		Assert.NotNull( run.Finished );
+		Assert.Equal( RunResults.Succeeded, run.Result );
+	}
+
+	[Fact]
+	public async Task CompletionFromAWorkerThatLostTheRunToAdoptionIsRefused()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		await _leaseProvider.ReleaseAsync( schedule, $"{Claimant}/1" );
+
+		await ClaimSingleAsync( schedule, worker: 2 );
+
+		DateTime? nextRun = ( await GetScheduleAsync( schedule ) )!.State.NextRun;
+
+		ClaimNotHeldException exception = await Assert.ThrowsAsync<ClaimNotHeldException>(
+				() => _coordinator.ReportCompletionAsync(
+						job.Context.Run, Claimant, 1, RunResults.Succeeded, new JobOutcome { Successful = true } ) );
+
+		Assert.Equal( job.Context.Run, exception.Run );
+		Assert.Null( Assert.Single( await GetRunsAsync( schedule ) ).Finished );
+		Assert.Equal( nextRun, ( await GetScheduleAsync( schedule ) )!.State.NextRun );
+
+		// The adopter still holds the claim and can complete.
+		Assert.Equal( $"{Claimant}/2", ( await _leaseProvider.GetAsync( schedule ) ).ClaimedBy );
+
+		await _coordinator.ReportCompletionAsync(
+				job.Context.Run, Claimant, 2, RunResults.Succeeded, new JobOutcome { Successful = true } );
+
+		Assert.NotNull( Assert.Single( await GetRunsAsync( schedule ) ).Finished );
+	}
+
+	[Fact]
+	public async Task CompletionFromAWorkerThatNeverClaimedTheRunIsRefused()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		await Assert.ThrowsAsync<ClaimNotHeldException>(
+				() => _coordinator.ReportCompletionAsync(
+						job.Context.Run, Claimant, 2, RunResults.Succeeded, new JobOutcome { Successful = true } ) );
+
+		Assert.Null( Assert.Single( await GetRunsAsync( schedule ) ).Finished );
+		Assert.Equal( $"{Claimant}/1", ( await _leaseProvider.GetAsync( schedule ) ).ClaimedBy );
+	}
+
+	[Fact]
+	public async Task SecondCompletionOfAFinishedRunIsRefusedWithoutAdvancingTheSchedule()
+	{
+		string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+		ClaimedJob job = await ClaimSingleAsync( schedule );
+
+		await _coordinator.ReportCompletionAsync(
+				job.Context.Run, Claimant, 1, RunResults.Succeeded, new JobOutcome { Successful = true } );
+
+		ScheduleInfo advanced = ( await GetScheduleAsync( schedule ) )!;
+
+		await Assert.ThrowsAsync<ClaimNotHeldException>(
+				() => _coordinator.ReportCompletionAsync(
+						job.Context.Run, Claimant, 1, RunResults.Failed, new JobOutcome { Successful = false } ) );
+
+		ScheduleInfo after = ( await GetScheduleAsync( schedule ) )!;
+
+		Assert.Equal( advanced.State.NextRun, after.State.NextRun );
+		Assert.Equal( advanced.State.Attempt, after.State.Attempt );
+		Assert.Equal( RunResults.Succeeded, Assert.Single( await GetRunsAsync( schedule ) ).Result );
+	}
 }

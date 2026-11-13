@@ -330,6 +330,24 @@ public class ExecutionCoordinatorEndpointsTests : IClassFixture<SchedulingApiFix
 	}
 
 	[Fact]
+	public async Task CompletionFromAWorkerThatDoesNotHoldTheRunIsAConflict()
+	{
+		await RegisterDueScheduleAsync( "Completed by a stranger" );
+
+		using HttpClient client = _fixture.CreateClient( Worker );
+
+		ClaimedJob job = await ClaimAsync( client, Worker );
+
+		// Same claimant, so authorized — but not the worker the run is recorded under.
+		HttpResponseMessage response = await client.PostAsync(
+				$"/executionCoordinator/JobRuns/{job.Context.Run}/completion?{CallerQuery( Worker, _worker + 1000 )}",
+				SchedulingApiFixture.JsonContent(
+						new JobRunCompletion { Result = RunResults.Succeeded, Outcome = null } ) );
+
+		Assert.Equal( HttpStatusCode.Conflict, response.StatusCode );
+	}
+
+	[Fact]
 	public async Task CompletionAsAnotherWorkerIsForbidden()
 	{
 		using HttpClient client = _fixture.CreateClient( Worker );
