@@ -1,3 +1,4 @@
+using System.Transactions;
 using Pug.Application.Data;
 using Pug.Application.Data.Extensions;
 using Pug.Application.Security;
@@ -13,6 +14,16 @@ namespace Pug.Scheduling
 	// before role-based ACLs); composes ExecutionLease from the lease provider at read time.
 	public class Scheduler : SchedulerBase, IScheduler
 	{
+		// Every schedule-store unit here is a single statement, except a delete's two writes (run
+		// history, then schedule). No unit acts on a read made in the same transaction (the
+		// existing schedule is read in a unit of its own), so SERIALIZABLE — the data extensions'
+		// default — protects nothing, while on Postgres it fails a write racing the coordinator's
+		// writes to the same schedule row (40001) instead of applying it once the other commits.
+		// READ COMMITTED, as for the execution coordinator (D22); each unit commits on its own,
+		// never inside a caller's transaction.
+		private static readonly TransactionOptions ScheduleStoreTransaction =
+			new() { IsolationLevel = IsolationLevel.ReadCommitted };
+
 		private readonly IdentifierGenerator _identifierGenerator;
 		private readonly IExecutionLeaseProvider _leaseProvider;
 		private readonly IJobTypeRegistry _jobTypeRegistry;
@@ -116,7 +127,8 @@ namespace Pug.Scheduling
 				await ApplicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
 								await session.GetScheduleAsync( context.identifier ).ConfigureAwait( false ),
-							context: new { identifier }
+							context: new { identifier },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			if( schedule == null )
@@ -170,7 +182,8 @@ namespace Pug.Scheduling
 			await ApplicationDataProvider.PerformAsync(
 						async ( session, context ) =>
 							await session.InsertAsync( context.schedule ).ConfigureAwait( false ),
-						context: new { schedule }
+						context: new { schedule },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 
 			return schedule.Identifier;
@@ -192,7 +205,8 @@ namespace Pug.Scheduling
 							async ( session, context ) =>
 								await session.GetSchedulesAsync( context.domain, context.owner, context.jobType )
 											.ConfigureAwait( false ),
-							context: new { domain, owner, jobType }
+							context: new { domain, owner, jobType },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			List<ScheduleInfo> composed = new();
@@ -246,7 +260,8 @@ namespace Pug.Scheduling
 											context.lastUpdate
 										)
 										.ConfigureAwait( false ),
-						context: new { identifier, definition, nextRun, lastUpdate = CreateActionContext() }
+						context: new { identifier, definition, nextRun, lastUpdate = CreateActionContext() },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -261,7 +276,8 @@ namespace Pug.Scheduling
 			await ApplicationDataProvider.PerformAsync(
 						async ( session, context ) =>
 							await session.DeleteAsync( context.identifier ).ConfigureAwait( false ),
-						context: new { identifier }
+						context: new { identifier },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -283,7 +299,8 @@ namespace Pug.Scheduling
 						async ( session, context ) =>
 							await session.SetPausedAsync( context.identifier, context.paused )
 										.ConfigureAwait( false ),
-						context: new { identifier, paused }
+						context: new { identifier, paused },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -301,7 +318,8 @@ namespace Pug.Scheduling
 						async ( session, context ) =>
 							await session.RequestRunAsync( context.identifier, context.requestedTime )
 										.ConfigureAwait( false ),
-						context: new { identifier, requestedTime = DateTime.UtcNow }
+						context: new { identifier, requestedTime = DateTime.UtcNow },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -319,7 +337,8 @@ namespace Pug.Scheduling
 						async ( session, context ) =>
 							await session.GetRunsAsync( context.identifier, context.from, context.to )
 										.ConfigureAwait( false ),
-						context: new { identifier, from, to }
+						context: new { identifier, from, to },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 		}
 	}

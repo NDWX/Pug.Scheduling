@@ -61,8 +61,11 @@ namespace Pug.Scheduling.Data.Abstractions
 		Task<ScheduleRun?> GetLatestRunAsync( string schedule );
 
 		// Records the lease holder ("{claimant}/{worker}") a run is executing under: set at
-		// insertion, and transferred when another worker adopts the unfinished run.
-		Task ClaimRunAsync( string run, string claimedBy );
+		// insertion, and transferred when another worker adopts the unfinished run. The transfer
+		// applies only while the run is unfinished. Returns false when nothing was updated: the
+		// previous holder's completion landed after the caller read the run, so a finished run is
+		// never adopted (and re-executed).
+		Task<bool> ClaimRunAsync( string run, string claimedBy );
 
 		// Records the run's terminal state (finished timestamp, worker classification, handler
 		// outcome), only while the run is unfinished and still claimed by claimedBy. A run recorded

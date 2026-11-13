@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pug.Application.Security;
 using Pug.Application.Data.Extensions;
@@ -752,6 +753,260 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase, TLeaseDatabas
 		Assert.Equal( advanced.State.Attempt, after.State.Attempt );
 		Assert.Equal( RunResults.Succeeded, Assert.Single( await GetRunsAsync( schedule ) ).Result );
 	}
+
+	// A worker whose claim lapsed while its run was executing reports completion at the moment a
+	// peer claims the schedule and would adopt that unfinished run. Exactly one side wins, through
+	// the stores' conditional writes alone: the completion (the peer then gets nothing to
+	// execute), or the adoption (the late completion is then refused). The loser must never see a
+	// raw store failure instead — on Postgres, a serialization failure (40001) — and a run the
+	// completion finished must never be adopted and executed again.
+	[Fact]
+	public async Task LateCompletionRacingAdoptionHasExactlyOneWinner()
+	{
+		const int iterations = 60;
+		const string completer = "late-completer";
+		const string adopter = "adopter";
+
+		string completerHolder = $"{completer}/1";
+		string adopterHolder = $"{adopter}/1";
+
+		ExecutionCoordinator completing =
+			CreateCoordinator( "run-completer", SecurityManagerFactory.CreateAlwaysAuthorized( completer ) );
+
+		ExecutionCoordinator adopting =
+			CreateCoordinator( "run-adopter", SecurityManagerFactory.CreateAlwaysAuthorized( adopter ) );
+
+		int completed = 0;
+		int adopted = 0;
+		List<string> failures = new();
+
+		for( int iteration = 0; iteration < iterations; iteration++ )
+		{
+			string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+			ClaimedJob? job = await completing.ClaimDueJobAsync( completer, 1, _jobType );
+
+			Assert.Equal( schedule, job?.Context.Schedule );
+
+			string run = job!.Context.Run;
+
+			// The completer's claim lapses while its run is still executing.
+			await _leaseProvider.ReleaseAsync( schedule, completerHolder );
+
+			// The start of one side is held back by a stagger swept across the iterations
+			// (positive: the completion waits, negative: the claim waits), so the two writes land
+			// in both orders and, around zero, while the other is in flight.
+			TimeSpan stagger = TimeSpan.FromMilliseconds( ( iteration % 9 - 4 ) * 0.5 );
+
+			TaskCompletionSource start = new( TaskCreationOptions.RunContinuationsAsynchronously );
+
+			Task completion = Task.Run(
+					async () =>
+					{
+						await start.Task;
+
+						SpinFor( stagger );
+
+						await completing.ReportCompletionAsync(
+								run, completer, 1, RunResults.Succeeded, new JobOutcome { Successful = true } );
+					} );
+
+			Task<ClaimedJob?> claim = Task.Run<ClaimedJob?>(
+					async () =>
+					{
+						await start.Task;
+
+						SpinFor( -stagger );
+
+						return await adopting.ClaimDueJobAsync( adopter, 1, _jobType );
+					} );
+
+			start.SetResult();
+
+			Exception? completionError = await CaptureAsync( completion );
+			Exception? claimError = await CaptureAsync( claim );
+			ClaimedJob? claimed = claimError is null ? await claim : null;
+
+			ScheduleRun[] runs = ( await GetRunsAsync( schedule ) ).ToArray();
+			ScheduleRun? record = runs.Length == 1 ? runs[0] : null;
+
+			bool completionWon =
+				completionError is null && claimError is null && claimed is null &&
+				record?.Finished is not null && record.ClaimedBy == completerHolder;
+
+			bool adoptionWon =
+				completionError is ClaimNotHeldException && claimError is null &&
+				claimed?.Context.Run == run &&
+				record is not null && record.Finished is null && record.ClaimedBy == adopterHolder;
+
+			if( completionWon )
+				completed++;
+			else if( adoptionWon )
+				adopted++;
+			else
+				failures.Add(
+						$"iteration {iteration} (stagger {stagger.TotalMilliseconds} ms): " +
+						$"completion {Describe( completionError )}; " +
+						$"claim {( claimError is null ? $"returned run {claimed?.Context.Run ?? "none"}" : Describe( claimError ) )}; " +
+						$"{runs.Length} run row(s): " +
+						string.Join(
+								", ",
+								runs.Select(
+										row => $"{row.Identifier} claimed by {row.ClaimedBy}, " +
+												$"{( row.Finished is null ? "unfinished" : "finished" )}" ) ) );
+
+			// Settle the iteration so the next one claims only its own schedule.
+			await _scheduleDatabase.ApplicationData.PerformAsync(
+					async ( session, context ) =>
+						await session.UpdateNextRunAsync( context.schedule, context.nextRun ),
+					context: new { schedule, nextRun = (DateTime?)DateTime.UtcNow.AddDays( 1 ) } );
+
+			await _leaseProvider.ReleaseAsync( schedule, adopterHolder );
+		}
+
+		Assert.True( failures.Count == 0, string.Join( Environment.NewLine, failures ) );
+
+		// Both orderings must actually have been exercised, or the test proves nothing.
+		Assert.True( completed > 0, $"The completion never won ({adopted} adoptions)." );
+		Assert.True( adopted > 0, $"The adoption never won ({completed} completions)." );
+	}
+
+	// The management facade writes the same schedule row the coordinator's completion advances:
+	// pausing, requesting a run, or updating the definition while a run of the schedule is being
+	// completed. Neither side may fail for the other's write — on Postgres, no serialization
+	// failure (40001) — and both writes take effect, last writer winning on the columns both set.
+	[Fact]
+	public async Task ManagementWritesRacingACompletionNeitherFails()
+	{
+		const int iterations = 60;
+		const string worker = "completer";
+
+		ExecutionCoordinator completing =
+			CreateCoordinator( "run-racing-management", SecurityManagerFactory.CreateAlwaysAuthorized( worker ) );
+
+		// Owns the schedules InsertScheduleAsync creates, so the owner rule admits every operation.
+		Scheduler scheduler = new(
+				new SequentialIdGenerator( "schedule-management" ),
+				_scheduleDatabase.ApplicationData,
+				SecurityManagerFactory.CreateAlwaysAuthorized( "owner-1" ),
+				_leaseProvider,
+				new FakeJobTypeRegistry( _jobType ),
+				new SchedulerOptions() );
+
+		List<string> failures = new();
+
+		for( int iteration = 0; iteration < iterations; iteration++ )
+		{
+			string schedule = await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 ) );
+
+			ClaimedJob? job = await completing.ClaimDueJobAsync( worker, 1, _jobType );
+
+			Assert.Equal( schedule, job?.Context.Schedule );
+
+			ScheduleDefinition renamed =
+				( await GetScheduleAsync( schedule ) )!.Definition with { Name = $"Renamed {iteration}" };
+
+			int operation = iteration % 3;
+
+			Func<Task> manage = operation switch
+			{
+				0 => () => scheduler.PauseAsync( schedule ),
+				1 => () => scheduler.RunNowAsync( schedule ),
+				_ => () => scheduler.UpdateDefinitionAsync( schedule, renamed )
+			};
+
+			TimeSpan stagger = TimeSpan.FromMilliseconds( ( iteration / 3 % 9 - 4 ) * 0.5 );
+
+			TaskCompletionSource start = new( TaskCreationOptions.RunContinuationsAsynchronously );
+
+			Task completion = Task.Run(
+					async () =>
+					{
+						await start.Task;
+
+						SpinFor( stagger );
+
+						await completing.ReportCompletionAsync(
+								job!.Context.Run, worker, 1, RunResults.Succeeded, new JobOutcome { Successful = true } );
+					} );
+
+			Task management = Task.Run(
+					async () =>
+					{
+						await start.Task;
+
+						SpinFor( -stagger );
+
+						await manage();
+					} );
+
+			start.SetResult();
+
+			Exception? completionError = await CaptureAsync( completion );
+			Exception? managementError = await CaptureAsync( management );
+
+			ScheduleInfo after = ( await GetScheduleAsync( schedule ) )!;
+			ScheduleRun[] runs = ( await GetRunsAsync( schedule ) ).ToArray();
+
+			// The completion applied: its run finished, and the schedule recorded it.
+			bool completed = runs.Length == 1 && runs[0].Finished is not null &&
+							after.State.LastRun?.Result == RunResults.Succeeded;
+
+			// The management write applied too. A run request is cleared by a completion recorded
+			// after it, so either order is a legitimate outcome there.
+			bool managed = operation switch
+			{
+				0 => after.State.Paused,
+				1 => after.State.RunRequested
+						? after.State.NextRun <= DateTime.UtcNow
+						: after.State.NextRun > DateTime.UtcNow,
+				_ => after.Definition.Name == renamed.Name
+			};
+
+			if( completionError is not null || managementError is not null || !completed || !managed )
+				failures.Add(
+						$"iteration {iteration} ({( operation == 0 ? "pause" : operation == 1 ? "run now" : "update definition" )}, " +
+						$"stagger {stagger.TotalMilliseconds} ms): completion {Describe( completionError )}; " +
+						$"management {Describe( managementError )}; completion applied {completed}; " +
+						$"management applied {managed}" );
+
+			// Settle the iteration so the next one claims only its own schedule.
+			await _scheduleDatabase.ApplicationData.PerformAsync(
+					async ( session, context ) =>
+						await session.UpdateNextRunAsync( context.schedule, context.nextRun ),
+					context: new { schedule, nextRun = (DateTime?)DateTime.UtcNow.AddDays( 1 ) } );
+		}
+
+		Assert.True( failures.Count == 0, string.Join( Environment.NewLine, failures ) );
+	}
+
+	private static void SpinFor( TimeSpan duration )
+	{
+		if( duration <= TimeSpan.Zero )
+			return;
+
+		Stopwatch stopwatch = Stopwatch.StartNew();
+
+		while( stopwatch.Elapsed < duration )
+			Thread.SpinWait( 20 );
+	}
+
+	private static async Task<Exception?> CaptureAsync( Task task )
+	{
+		try
+		{
+			await task;
+
+			return null;
+		}
+		catch( Exception exception )
+		{
+			return exception;
+		}
+	}
+
+	private static string Describe( Exception? exception ) =>
+		exception is null ? "succeeded" : $"threw {exception.GetType().Name}: {exception.Message}";
 }
 
 public sealed class SqliteExecutionCoordinatorTests

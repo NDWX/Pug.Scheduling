@@ -1,3 +1,4 @@
+using System.Transactions;
 using Microsoft.Extensions.Logging;
 using Pug.Application.Data;
 using Pug.Application.Data.Extensions;
@@ -25,6 +26,17 @@ namespace Pug.Scheduling
 	// lease, and PrepareJobAsync adopts the unfinished run rather than duplicating it.
 	public class ExecutionCoordinator : IExecutionCoordinator
 	{
+		// Every schedule-store unit is either a single read or writes only, never a read the same
+		// transaction then acts on: the races between writers are settled by single-statement
+		// conditions (a run is completed or adopted only while unfinished) and by the execution
+		// lease guarding the schedule. Those are READ COMMITTED semantics, as for the lease store
+		// (D21, D22). The data extensions' default scope is SERIALIZABLE, under which Postgres
+		// fails the losing side of a race (40001) — e.g. a late completion racing an adoption of
+		// the same run — instead of letting its conditional write affect no rows. Each unit
+		// commits on its own, never inside a caller's transaction.
+		private static readonly TransactionOptions ScheduleStoreTransaction =
+			new() { IsolationLevel = IsolationLevel.ReadCommitted };
+
 		private readonly IdentifierGenerator _identifierGenerator;
 		private readonly IApplicationData<IDataSession> _applicationDataProvider;
 		private readonly IExecutionLeaseProvider _leaseProvider;
@@ -124,7 +136,8 @@ namespace Pug.Scheduling
 								await session.GetDueSchedulesAsync(
 												context.dueBy, context.jobType, context.maximumSchedules )
 											.ConfigureAwait( false ),
-							context: new { dueBy = DateTime.UtcNow, jobType, maximumSchedules = _options.ClaimCandidates }
+							context: new { dueBy = DateTime.UtcNow, jobType, maximumSchedules = _options.ClaimCandidates },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			foreach( ScheduleInfo schedule in candidates )
@@ -203,11 +216,13 @@ namespace Pug.Scheduling
 				await _applicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
 								await session.GetLatestRunAsync( context.schedule ).ConfigureAwait( false ),
-							context: new { schedule = schedule.Identifier }
+							context: new { schedule = schedule.Identifier },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			DateTime scheduledFor;
 			string trigger;
+			bool skip = false;
 
 			if( state.RunRequested )
 			{
@@ -230,14 +245,34 @@ namespace Pug.Scheduling
 
 				bool misfired = now - due > definition.MisfirePolicy.Threshold;
 
-				if( misfired && definition.MisfirePolicy.Handling == MisfireHandlings.Skip )
-				{
-					await SkipOccurrenceAsync( schedule, holder, due, now ).ConfigureAwait( false );
-
-					return null;
-				}
-
+				skip = misfired && definition.MisfirePolicy.Handling == MisfireHandlings.Skip;
 				trigger = misfired ? RunTriggers.Misfire : RunTriggers.Schedule;
+			}
+
+			// The candidate was read before the lease was taken. A late completion by the previous
+			// holder that landed in between finished the very occurrence and attempt the candidate
+			// still names, so recording it again could only collide with that run
+			// (uxScheduleRunFire): the candidate is stale. Decided on the finished run itself,
+			// not on the schedule's advance, which a provider without atomic units (SQLite) may
+			// not have recorded yet.
+			if( latestRun is not null && latestRun.Finished is not null &&
+				latestRun.ScheduledFor == scheduledFor && latestRun.Attempt == state.Attempt )
+			{
+				_logger.LogWarning(
+						"Discarded stale due candidate {Schedule}: its occurrence {ScheduledFor} (attempt {Attempt}) " +
+						"finished as run {Run} since the due read.",
+						schedule.Identifier, scheduledFor, state.Attempt, latestRun.Identifier );
+
+				await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
+
+				return null;
+			}
+
+			if( skip )
+			{
+				await SkipOccurrenceAsync( schedule, holder, due, now ).ConfigureAwait( false );
+
+				return null;
 			}
 
 			// Adopt the unfinished run of a lapsed claim (crashed worker) rather than inserting
@@ -250,12 +285,30 @@ namespace Pug.Scheduling
 				runIdentifier = latestRun.Identifier;
 
 				// The claim on the run moves to the adopter; the previous holder's completion is
-				// refused from here on.
-				await _applicationDataProvider.PerformAsync(
-							async ( session, context ) =>
-								await session.ClaimRunAsync( context.run, context.holder ).ConfigureAwait( false ),
-							context: new { run = runIdentifier, holder }
-						).ConfigureAwait( false );
+				// refused from here on. The transfer is conditional on the run still being
+				// unfinished: a late completion by the previous holder may have landed since the
+				// latest-run read, and a finished run must not be executed again.
+				bool adopted = await _applicationDataProvider.ExecuteAsync(
+										async ( session, context ) =>
+											await session.ClaimRunAsync( context.run, context.holder )
+														.ConfigureAwait( false ),
+										context: new { run = runIdentifier, holder },
+										TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
+									).ConfigureAwait( false );
+
+				if( !adopted )
+				{
+					// Nothing is claimed, so a pending run request is left for the claim that honors
+					// it (the completion recording the finish clears any request raised before it).
+					_logger.LogWarning(
+							"Discarded stale due candidate {Schedule}: its unfinished run {Run} was completed by " +
+							"its previous holder before it could be adopted.",
+							schedule.Identifier, runIdentifier );
+
+					await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
+
+					return null;
+				}
 
 				_logger.LogInformation(
 						"Claimant {Claimant} worker {Worker} adopted unfinished run {Run} of schedule {Schedule} " +
@@ -266,7 +319,8 @@ namespace Pug.Scheduling
 					await _applicationDataProvider.PerformAsync(
 								async ( session, context ) =>
 									await session.ClearRunRequestAsync( context.schedule ).ConfigureAwait( false ),
-								context: new { schedule = schedule.Identifier }
+								context: new { schedule = schedule.Identifier },
+								TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 							).ConfigureAwait( false );
 			}
 			else
@@ -301,7 +355,8 @@ namespace Pug.Scheduling
 								run,
 								schedule = schedule.Identifier,
 								clearRunRequest = state.RunRequested
-							}
+							},
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 			}
 
@@ -365,7 +420,8 @@ namespace Pug.Scheduling
 										)
 										.ConfigureAwait( false );
 						},
-						context: new { run, schedule = schedule.Identifier, nextRun, lastRun }
+						context: new { run, schedule = schedule.Identifier, nextRun, lastRun },
+						TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 					).ConfigureAwait( false );
 
 			await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
@@ -385,7 +441,8 @@ namespace Pug.Scheduling
 				await _applicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
 								await session.GetRunAsync( context.run ).ConfigureAwait( false ),
-							context: new { run }
+							context: new { run },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			if( runRecord is null )
@@ -428,7 +485,8 @@ namespace Pug.Scheduling
 				await _applicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
 								await session.GetRunAsync( context.run ).ConfigureAwait( false ),
-							context: new { run }
+							context: new { run },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			if( runRecord is null )
@@ -438,7 +496,8 @@ namespace Pug.Scheduling
 				await _applicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
 								await session.GetScheduleAsync( context.schedule ).ConfigureAwait( false ),
-							context: new { schedule = runRecord.Schedule }
+							context: new { schedule = runRecord.Schedule },
+							TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 						).ConfigureAwait( false );
 
 			if( schedule is null )
@@ -556,7 +615,8 @@ namespace Pug.Scheduling
 									{
 										run, holder, now, result, outcome, schedule = schedule.Identifier, attempt,
 										nextRun, lastRun
-									}
+									},
+									TransactionScopeOption.RequiresNew, ScheduleStoreTransaction
 								).ConfigureAwait( false );
 
 			if( !completed )
