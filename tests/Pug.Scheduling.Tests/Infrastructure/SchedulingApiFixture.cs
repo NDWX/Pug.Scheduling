@@ -30,8 +30,8 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 	internal const string JobType = "test";
 	internal const string Domain = "tenant-1";
 
-	private readonly ScheduleDatabaseFixture _scheduleDatabase = new();
-	private readonly LeaseDatabaseFixture _leaseDatabase = new();
+	private readonly SqliteScheduleDatabaseFixture _scheduleDatabase = new();
+	private readonly SqliteLeaseDatabaseFixture _leaseDatabase = new();
 
 	private IHost _host = null!;
 

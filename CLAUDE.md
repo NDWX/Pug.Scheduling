@@ -12,6 +12,10 @@ dotnet build Pug.Scheduling.slnx -warnaserror -m:1
 dotnet test tests/Pug.Scheduling.Tests
 ```
 
+The Postgres test classes (`[Trait( "Category", "Postgres" )]`) start a Testcontainers PostgreSQL
+and need Docker — on this machine run the tests as `sg docker -c "dotnet test tests/Pug.Scheduling.Tests"`.
+Without Docker, `--filter "Category!=Postgres"` runs the rest.
+
 ## Solution layout
 
 | Project | Role |
@@ -22,7 +26,7 @@ dotnet test tests/Pug.Scheduling.Tests
 | `Pug.Scheduling` | `Scheduler` facade (validation, defaults, owner-rule-then-ACL authz), `ExecutionCoordinator` (claim/misfire/retry/completion state machine), `RecurrenceCalculator` (Cronos). |
 | `Pug.Scheduling.Data.Abstractions` | Schedule-store `IDataSession` (no lease semantics; plain `GetDueSchedulesAsync`). |
 | `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores. **The Postgres session mirrors the SQLite session by hand.** It differs only by namespace, `enabled = 1 and paused = 0` → `enabled and not paused`, and SQLite's D18 UTC stamping on read (Postgres `timestamptz` needs none). Make every edit in both and keep them in sync. Do **not** regenerate Postgres with `sed`: that would copy the SQLite-only stamping across. |
-| `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration). Lease state never touches the schedule table. |
+| `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration, each operation in its own READ COMMITTED transaction — D21). Lease state never touches the schedule table. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → create handler → execute → dispose → heartbeat → report), one job at a time, constructed with its host-wide worker number and claiming as `( Claimant, number, JobType )`; pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. `WorkerOptions` (`Claimant` = machine name by default, `Workers`, `JobType`, intervals, `Validate()`); `SchedulerWorkerRegistry`. |
 | `Pug.Scheduling.Worker.DependencyInjection` | net10.0 worker-host DI: `AddSchedulingWorkers( options, coordinator )` — once per worker group; numbers 1..N host-wide in registration order (accumulator singleton), one `IHostedService` singleton per worker (never `AddHostedService`: it dedups), optional per-group coordinator factory, registers `ISchedulerWorkerRegistry`; `AddScheduledJobHandler<T>(jobType)` (keyed scoped, one DI scope per run), `AddScheduledJobHandlerFactory<T>`; internal registry and scoped-handler wrapper. References no `Pug.Scheduling`/Data/Leases. Handler registration does not mark a type schedulable. |
 | `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `JobRunClaimRequest`, `JobRunCompletion`. Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
@@ -70,9 +74,11 @@ Tabs; block-scoped namespaces; spaces inside parens `Method( arg )`; `.Configure
 in library code; `[DataContract]` records with the `#if NET5_0_OR_GREATER init/set` accessor
 pattern; data access via `ApplicationDataProvider.ExecuteAsync/PerformAsync( async ( session,
 context ) => …, context: new { … } )`; contracts multi-target `net6.0;net8.0;net10.0`,
-implementations `net10.0`. Tests: xUnit, per-fixture SQLite temp DBs migrated by DbUp from
-`GetSchemaUpgradeScripts()`; Moq only for `ISecurityManager`. No Docker here ⇒ Postgres providers
-are build-verified only (CI should run Testcontainers races).
+implementations `net10.0`. Tests: xUnit, per-fixture databases migrated by DbUp from
+`GetSchemaUpgradeScripts()`; Moq only for `ISecurityManager`. Store-backed suites are abstract
+generics over `IScheduleDatabaseFixture`/`ILeaseDatabaseFixture` with a `Sqlite…` and a
+`Postgres…` subclass each (Postgres: one shared Testcontainers server, a database per fixture);
+the HTTP/API suites run on SQLite only.
 
 ## Workflow requirement
 

@@ -16,10 +16,15 @@ namespace Pug.Scheduling.Tests;
 
 /// <summary>
 /// Worker groups as registered by <c>AddSchedulingWorkers</c>: host-wide numbering, one hosted
-/// service per worker, per-group coordinators, and — against the real coordinator over SQLite —
-/// concurrent execution across workers and job-type filtering.
+/// service per worker, per-group coordinators, and — against the real coordinator over each
+/// provider's stores, per the subclasses below — concurrent execution across workers and job-type
+/// filtering.
 /// </summary>
-public class SchedulerWorkerGroupTests : IClassFixture<ScheduleDatabaseFixture>, IClassFixture<LeaseDatabaseFixture>
+// The fixtures are declared by the concrete subclasses: two IClassFixture<T> over type parameters
+// could unify (CS0695).
+public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabase>
+	where TScheduleDatabase : class, IScheduleDatabaseFixture
+	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
 	// Records every claim and claims nothing.
 	private sealed class RecordingCoordinator : IExecutionCoordinator
@@ -41,10 +46,10 @@ public class SchedulerWorkerGroupTests : IClassFixture<ScheduleDatabaseFixture>,
 
 	private static readonly TimeSpan FastPoll = TimeSpan.FromMilliseconds( 25 );
 
-	private readonly ScheduleDatabaseFixture _scheduleDatabase;
-	private readonly LeaseDatabaseFixture _leaseDatabase;
+	private readonly TScheduleDatabase _scheduleDatabase;
+	private readonly TLeaseDatabase _leaseDatabase;
 
-	public SchedulerWorkerGroupTests( ScheduleDatabaseFixture scheduleDatabase, LeaseDatabaseFixture leaseDatabase )
+	protected SchedulerWorkerGroupTests( TScheduleDatabase scheduleDatabase, TLeaseDatabase leaseDatabase )
 	{
 		_scheduleDatabase = scheduleDatabase;
 		_leaseDatabase = leaseDatabase;
@@ -418,5 +423,28 @@ public class SchedulerWorkerGroupTests : IClassFixture<ScheduleDatabaseFixture>,
 		}
 
 		throw new TimeoutException( "Condition was not met before the deadline." );
+	}
+}
+
+public sealed class SqliteSchedulerWorkerGroupTests
+	: SchedulerWorkerGroupTests<SqliteScheduleDatabaseFixture, SqliteLeaseDatabaseFixture>,
+		IClassFixture<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteLeaseDatabaseFixture>
+{
+	public SqliteSchedulerWorkerGroupTests( SqliteScheduleDatabaseFixture scheduleDatabase,
+											SqliteLeaseDatabaseFixture leaseDatabase )
+		: base( scheduleDatabase, leaseDatabase )
+	{
+	}
+}
+
+[Trait( "Category", "Postgres" )]
+public sealed class PostgresSchedulerWorkerGroupTests
+	: SchedulerWorkerGroupTests<PostgresScheduleDatabaseFixture, PostgresLeaseDatabaseFixture>,
+		IClassFixture<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresLeaseDatabaseFixture>
+{
+	public PostgresSchedulerWorkerGroupTests( PostgresScheduleDatabaseFixture scheduleDatabase,
+											PostgresLeaseDatabaseFixture leaseDatabase )
+		: base( scheduleDatabase, leaseDatabase )
+	{
 	}
 }
