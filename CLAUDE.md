@@ -17,17 +17,19 @@ dotnet test tests/Pug.Scheduling.Tests
 | Project | Role |
 |---|---|
 | `Pug.Scheduling.Models` | `WorkerInfo`, `ScheduleInfo { Identifier, Definition, Owner, State, ExecutionLease, Registration/LastUpdate : ActionContext<Reference> }`, `ScheduleRun` (embeds `Outcome : JobOutcome`, keeps worker-classification `Result`), `ScheduledJobContext`, `ClaimedJob`, string-constant classes (`RunTriggers`, `RunResults`, `MisfireHandlings`). |
-| `Pug.Scheduling.Abstractions` | `IScheduler` (config only), `IExecutionCoordinator` (workers' ONLY surface), `IExecutionLeaseProvider`, `IScheduledJobHandler`/`IScheduledJobDispatcher`, `IJobPayloadValidator`, `IJobTypeRegistry`, `IdentifierGenerator`, options records, security constants (in Abstractions by user decision). |
+| `Pug.Scheduling.Abstractions` | `IScheduler` (config only), `IExecutionCoordinator` (workers' ONLY surface), `IExecutionLeaseProvider`, `IJobPayloadValidator`, `IJobTypeRegistry`, `IdentifierGenerator`, options records, security constants (in Abstractions by user decision). |
+| `Pug.Scheduling.JobHandler.Abstractions` | `IScheduledJobHandler` (receives the timeout), `IScheduledJobHandlerFactory` (takes the context), `IScheduledJobHandlerFactoryRegistry` (null when none). Multi-target, depends on Models only. |
 | `Pug.Scheduling` | `Scheduler` facade (validation, defaults, owner-rule-then-ACL authz), `ExecutionCoordinator` (claim/misfire/retry/completion state machine), `RecurrenceCalculator` (Cronos). |
 | `Pug.Scheduling.Data.Abstractions` | Schedule-store `IDataSession` (no lease semantics; plain `GetDueSchedulesAsync`). |
 | `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores. **The Postgres session mirrors the SQLite session by hand.** It differs only by namespace, `enabled = 1 and paused = 0` → `enabled and not paused`, and SQLite's D18 UTC stamping on read (Postgres `timestamptz` needs none). Make every edit in both and keep them in sync. Do **not** regenerate Postgres with `sed`: that would copy the SQLite-only stamping across. |
 | `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration). Lease state never touches the schedule table. |
-| `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → dispatch → heartbeat → report), pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. |
+| `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → create handler → execute → dispose → heartbeat → report), pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. |
+| `Pug.Scheduling.Worker.DependencyInjection` | net10.0 worker-host DI: `AddSchedulingWorker`, `AddScheduledJobHandler<T>(jobType)` (keyed scoped, one DI scope per run), `AddScheduledJobHandlerFactory<T>`; internal registry and scoped-handler wrapper. References no `Pug.Scheduling`/Data/Leases. Handler registration does not mark a type schedulable. |
 | `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `JobRunClaimRequest`, `JobRunCompletion`. Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…`, the out-of-process worker transport). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Multi-targeted, so it references only Abstractions/Models. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`worker/…`). Its own package so an out-of-process worker host references nothing it does not need. |
 | `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes; reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions only — a worker host must not pull in ASP.NET. |
-| `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddSchedulingWorker`, `AddScheduledJobHandler<T>(jobType)` (keyed scoped), `AddJobPayloadValidator<T>`, `AddSchedulableJobType`; `InProcessJobDispatcher` (DI scope per run). |
+| `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddJobPayloadValidator<T>`, `AddSchedulableJobType`. |
 
 ## Domain invariants (do not regress)
 

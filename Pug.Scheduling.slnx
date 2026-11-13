@@ -10,10 +10,12 @@
   </Folder>
   <Project Path="src/Pug.Scheduling.Models/Pug.Scheduling.Models.csproj" />
   <Folder Name="/Worker/">
+    <Project Path="src/Pug.Scheduling.Worker.DependencyInjection/Pug.Scheduling.Worker.DependencyInjection.csproj" />
     <Project Path="src/Pug.Scheduling.Worker.WebApi/Pug.Scheduling.Worker.WebApi.csproj" />
     <Project Path="src/Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
   </Folder>
   <Project Path="src/Pug.Scheduling.Abstractions/Pug.Scheduling.Abstractions.csproj" />
+  <Project Path="src/Pug.Scheduling.JobHandler.Abstractions/Pug.Scheduling.JobHandler.Abstractions.csproj" />
   <Project Path="src/Pug.Scheduling.Data.Abstractions/Pug.Scheduling.Data.Abstractions.csproj" />
   <Project Path="src/Pug.Scheduling/Pug.Scheduling.csproj" />
   <Project Path="src/Pug.Scheduling.Data.Postgres/Pug.Scheduling.Data.Postgres.csproj" />

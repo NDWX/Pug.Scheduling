@@ -12,12 +12,14 @@ Design rationale for every major shape lives in [`docs/DECISIONS.md`](docs/DECIS
 | Package | What it is for |
 |---|---|
 | `Pug.Scheduling.Models` | Entities and wire contracts. Referenced by everything. |
-| `Pug.Scheduling.Abstractions` | `IScheduler`, `IExecutionCoordinator`, `IExecutionLeaseProvider`, `IScheduledJobHandler`, `ISchedulerWorker`, security constants. |
+| `Pug.Scheduling.Abstractions` | `IScheduler`, `IExecutionCoordinator`, `IExecutionLeaseProvider`, `ISchedulerWorker`, security constants. |
 | `Pug.Scheduling` | The facades: `Scheduler` (management) and `ExecutionCoordinator` (execution). |
 | `Pug.Scheduling.Data.Abstractions` · `.Data.Postgres` · `.Data.SQLite` | Schedule store contract and its Dapper implementations. |
 | `Pug.Scheduling.Leases[.Data.Abstractions/.Postgres/.SQLite]` | Execution lease arbitration in its own store. |
+| `Pug.Scheduling.JobHandler.Abstractions` | `IScheduledJobHandler`, `IScheduledJobHandlerFactory` and its registry — all a handler author references. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker` — the execution pump. |
-| `Pug.Scheduling.DependencyInjection` | `AddScheduling`, `AddSchedulingWorker`, job type registration. |
+| `Pug.Scheduling.Worker.DependencyInjection` | `AddSchedulingWorker`, `AddScheduledJobHandler<T>`, `AddScheduledJobHandlerFactory<T>` — the worker host's DI. |
+| `Pug.Scheduling.DependencyInjection` | `AddScheduling`, job type registration (`AddSchedulableJobType`, `AddJobPayloadValidator`). |
 | `Pug.Scheduling.WebApi.Models` | HTTP surface contracts shared by the endpoints and the clients. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()`, `MapExecutionCoordinatorEndpoints()`. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` — separate so a worker host references nothing it does not need. |
@@ -29,8 +31,11 @@ A **schedule** is a recurrence (cron in an IANA time zone, or a fixed interval) 
 an opaque payload, owned by a principal. The scheduler computes the next occurrence; it never
 executes anything.
 
-A **worker** polls `IExecutionCoordinator` for due occurrences, dispatches each to an
-`IScheduledJobHandler` keyed by job type, and reports the outcome. Due-ness, claim exclusivity,
+A **worker** polls `IExecutionCoordinator` for due occurrences, hands each to an
+`IScheduledJobHandler` created by the factory registered for its job type (disposed after the run),
+and reports the outcome. Running a job elsewhere, such as calling a webhook, is the handler's business.
+Registering a handler does not make a job type schedulable; hosts that accept schedules for it also
+call `AddSchedulableJobType`. Due-ness, claim exclusivity,
 misfire handling, retry scheduling, and next-occurrence computation all live behind the
 coordinator — a worker sees none of it, and binds the same interface whether it runs in-process or
 against a remote scheduler.
@@ -56,7 +61,8 @@ services.AddSingleton<IExecutionLeaseProvider>(
 
 services.AddScheduling( identifierGenerator );
 
-services.AddScheduledJobHandler<ReportJobHandler>( "report" );      // executes here
+services.AddSchedulableJobType( "report" );                          // accepted at registration
+services.AddScheduledJobHandler<ReportJobHandler>( "report" );      // executes here (Worker.DependencyInjection)
 services.AddJobPayloadValidator<ReportPayloadValidator>( "report" ); // optional, checked at registration
 
 services.AddSchedulingWorker();   // omit where jobs execute elsewhere
@@ -75,7 +81,7 @@ app.MapSchedulerWorkerEndpoints();       // worker/...                 (only if 
 
 ## Hosting a worker out-of-process
 
-The worker host references `Pug.Scheduling.Worker` and `Pug.Scheduling.Client` — no data stores, no
+The worker host references `Pug.Scheduling.Worker.DependencyInjection` and `Pug.Scheduling.Client` — no data stores, no
 server-side packages — and binds the coordinator to its HTTP client:
 
 ```csharp

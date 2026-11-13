@@ -20,6 +20,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../Pug.Scheduling.Abstractions/Pug.Scheduling.Abstractions.csproj" />
+		<ProjectReference Include="../Pug.Scheduling.JobHandler.Abstractions/Pug.Scheduling.JobHandler.Abstractions.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

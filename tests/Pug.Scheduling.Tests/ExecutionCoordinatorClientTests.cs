@@ -178,20 +178,22 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	{
 		string identifier = await RegisterDueScheduleAsync( "Executed remotely" );
 
-		ScheduledJobContext? dispatched = null;
+		ScheduledJobContext? executed = null;
 
 		// The deployment this package exists for: a real worker whose only link to the scheduler
 		// is the HTTP coordinator client.
 		using Worker.SchedulerWorker worker = new(
 				_coordinator,
-				new DelegateDispatcher(
-						( context, _ ) =>
-						{
-							dispatched = context;
+				SingleFactoryRegistry.For(
+						"test",
+						new DelegateJobHandler(
+								( context, _, _ ) =>
+								{
+									executed = context;
 
-							return Task.FromResult(
-									new JobOutcome { Successful = true, Details = /*lang=json*/ """{"sent":true}""" } );
-						} ),
+									return Task.FromResult(
+											new JobOutcome { Successful = true, Details = /*lang=json*/ """{"sent":true}""" } );
+								} ) ),
 				new Worker.WorkerOptions
 				{
 					Claimant = Worker,
@@ -211,9 +213,9 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 			await worker.StopAsync( CancellationToken.None );
 		}
 
-		Assert.NotNull( dispatched );
-		Assert.Equal( identifier, dispatched!.Schedule );
-		Assert.Equal( Owner, dispatched.Owner.Identifier );
+		Assert.NotNull( executed );
+		Assert.Equal( identifier, executed!.Schedule );
+		Assert.Equal( Owner, executed.Owner.Identifier );
 
 		ScheduleRun run = Assert.Single( await _scheduler.GetRunsAsync( identifier ) );
 

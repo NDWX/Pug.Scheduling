@@ -96,11 +96,13 @@ atomicity and any number of coordinators race safely). An InMemory provider was 
 
 ## D7 — Third-party handler defensiveness (user directive)
 
-Handlers/dispatchers are "third-party" code. `JobOutcome { Successful, Details, Error }` (names
+Handlers and their factories (D19) are "third-party" code. `JobOutcome { Successful, Details, Error }` (names
 user-specified): handlers report failure by returning unsuccessful **or** throwing — the worker
 catches everything, materializes `{ Successful=false, Error }`, treats a null return as
 unsuccessful, and never trusts cancellation (lease expiry bounds runaways; an overrunning handler
-risks concurrent re-execution). `ScheduleRun` embeds `Outcome : JobOutcome` and **keeps** the
+risks concurrent re-execution). A factory that throws or returns null, or a missing factory, is
+likewise an unsuccessful outcome; handler disposal failures are logged and never change it.
+`ScheduleRun` embeds `Outcome : JobOutcome` and **keeps** the
 worker-classification `Result` string (`RunResults`): TIMED_OUT and SKIPPED runs never reach the
 handler, so they have no handler outcome.
 
@@ -151,18 +153,48 @@ Deletes are explicit (runs then schedule) rather than relying on FK cascade enfo
 ## D13 — Job types: schedulable vs executable
 
 `IJobTypeRegistry` (Abstractions) separates what is *schedulable* at the API host from what is
-*executable* where (handlers may live in other processes). DI: `AddScheduledJobHandler<T>(jobType)`
-(keyed scoped, resolved per run by `InProcessJobDispatcher` from a fresh DI scope),
-`AddJobPayloadValidator<T>(jobType)` (keyed singleton), `AddSchedulableJobType(jobType)` for
-remote-execution deployments. Unregistered job types are rejected at registration.
+*executable* where (handlers may live in other processes). Scheduler DI
+(`Pug.Scheduling.DependencyInjection`): `AddJobPayloadValidator<T>(jobType)` (keyed singleton) and
+`AddSchedulableJobType(jobType)`, both of which mark the type schedulable. Worker DI
+(`Pug.Scheduling.Worker.DependencyInjection`, D19): `AddScheduledJobHandler<T>(jobType)` and
+`AddScheduledJobHandlerFactory<T>(jobType)`, which register how a type is *executed* and no longer
+mark it schedulable — an in-process host calls `AddSchedulableJobType` as well. Unregistered job
+types are rejected at registration.
 
-## D14 — Dispatch transport
+## D14 — Dispatch transport (SUPERSEDED by D19)
 
 `IScheduledJobDispatcher` is the long-lived transport strategy (one per worker host, not per
 job): in-process v1 (no broker exists in the ecosystem; DB lease already gives at-least-once).
 Future webhook shape: standalone scheduler host (WebApi + worker) with a `WebhookJobDispatcher`
 POSTing `ScheduledJobContext` to per-job-type endpoints — needs service-to-service auth +
 owner-identity conveyance + a completion protocol; deliberately deferred.
+
+## D19 — No dispatch layer; handler factory registry (execution rework, sub-phase B)
+
+Supersedes D14. There is no `IScheduledJobDispatcher`: running a job somewhere else (e.g. calling a
+webhook) is the **handler's** responsibility, so a webhook is just a handler whose `ExecuteAsync`
+makes the call. This leaves one extension point instead of two.
+
+- **Factory registry keyed by job type.** `IScheduledJobHandlerFactoryRegistry.GetFactory( jobType )`
+  returns the `IScheduledJobHandlerFactory` for the type, or null (worker reports `FAILED`, "No
+  handler registered for job type"; retried per policy).
+- **The factory takes the context.** `Create( ScheduledJobContext )` lets a factory pick or configure
+  a handler per run (tenant, owner, payload).
+- **The handler receives the timeout.** `ExecuteAsync( context, timeout, cancellationToken )` —
+  the schedule's execution timeout, which the worker still enforces; handlers calling elsewhere can
+  pass it on.
+- **The worker disposes handlers** after every run (`IAsyncDisposable`, else `IDisposable`),
+  whatever the outcome; dispose failures are logged and swallowed.
+- **Two new projects.** `Pug.Scheduling.JobHandler.Abstractions` (multi-target, depends on Models
+  only: all a handler author needs) and `Pug.Scheduling.Worker.DependencyInjection` (net10.0;
+  `AddSchedulingWorker`, `AddScheduledJobHandler<T>`, `AddScheduledJobHandlerFactory<T>`). The
+  worker host's DI is separate from the scheduler's because an out-of-process worker host must not
+  reference `Pug.Scheduling`, the data stores or the lease stores. `AddScheduledJobHandler<T>` keeps
+  one DI scope per run: its factory creates the scope and the returned handler wrapper disposes it.
+- **Behaviour change:** handler registration no longer marks a job type schedulable; that bookkeeping
+  stays in `Pug.Scheduling.DependencyInjection` (`AddSchedulableJobType`, `AddJobPayloadValidator`).
+- Worker logging was completed (started/stopping, paused/resumed, claimed, finished, timed out,
+  failures, dispose failures; Debug for empty polls and renewals).
 
 ## D15 — WebApi surfaces
 
@@ -322,10 +354,11 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
   · **1f `.Client` (both facades), packaging metadata, README — DONE (88 tests)**
 - **Execution rework** (plan: single-job workers, no dispatcher, worker groups):
   **A coordinator contract (`claimant` + `worker`, one job per claim, job-type filter, candidate
-  window, schema v2 index) and coordinator logging — DONE (107 tests)**; B job-handler projects /
-  factory registry / no dispatcher, C worker groups and per-worker management — pending.
-- **Phase 1 COMPLETE.** Carry-overs: Postgres Testcontainers races in CI; webhook dispatch (D14)
-  still deferred.
+  window, schema v2 index) and coordinator logging — DONE (107 tests)**; **B job-handler projects /
+  factory registry / no dispatcher (D19, 123 tests) — DONE**; C worker groups and per-worker
+  management — pending.
+- **Phase 1 COMPLETE.** Carry-overs: Postgres Testcontainers races in CI; webhook dispatch (D14, superseded by D19:
+  a webhook is now a handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).
 - **Phase 3** SaaS integration (handler + `IEmailSender`/MailKit + `IEmailSenderProvider`,
   recipient policy, output store, link-first delivery ≤ 5 MB attachments, owner impersonation at
