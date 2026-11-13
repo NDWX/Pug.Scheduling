@@ -1,3 +1,4 @@
+using System.Transactions;
 using Pug.Application.Data;
 using Pug.Application.Data.Extensions;
 using Pug.Scheduling.Abstractions;
@@ -13,6 +14,14 @@ namespace Pug.Scheduling.Leases
 	// the schedule store. All times are UTC.
 	public class DatabaseExecutionLeaseProvider : IExecutionLeaseProvider
 	{
+		// Each operation is one statement arbitrating on the row as it stands when the statement
+		// runs: READ COMMITTED semantics. The data extensions' default scope is SERIALIZABLE, under
+		// which Postgres fails the losing side of a race (40001) instead of letting its conditional
+		// write affect no rows. Lease state is committed on its own, never inside a caller's
+		// transaction.
+		private static readonly TransactionOptions ArbitrationTransaction =
+			new() { IsolationLevel = IsolationLevel.ReadCommitted };
+
 		private readonly IApplicationData<IDataSession> applicationDataProvider;
 
 		public DatabaseExecutionLeaseProvider( IApplicationData<IDataSession> applicationData )
@@ -46,7 +55,8 @@ namespace Pug.Scheduling.Leases
 											DateTime.UtcNow
 										)
 										.ConfigureAwait( false ),
-						context: new { schedule, claimant, expiry }
+						context: new { schedule, claimant, expiry },
+						TransactionScopeOption.RequiresNew, ArbitrationTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -61,7 +71,8 @@ namespace Pug.Scheduling.Leases
 											DateTime.UtcNow
 										)
 										.ConfigureAwait( false ),
-						context: new { schedule, claimant, expiry }
+						context: new { schedule, claimant, expiry },
+						TransactionScopeOption.RequiresNew, ArbitrationTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -73,7 +84,8 @@ namespace Pug.Scheduling.Leases
 						async ( session, context ) =>
 							await session.ReleaseAsync( context.schedule, context.claimant )
 										.ConfigureAwait( false ),
-						context: new { schedule, claimant }
+						context: new { schedule, claimant },
+						TransactionScopeOption.RequiresNew, ArbitrationTransaction
 					).ConfigureAwait( false );
 		}
 
@@ -85,7 +97,8 @@ namespace Pug.Scheduling.Leases
 						async ( session, context ) =>
 							await session.GetAsync( context.schedule, DateTime.UtcNow )
 										.ConfigureAwait( false ),
-						context: new { schedule }
+						context: new { schedule },
+						TransactionScopeOption.RequiresNew, ArbitrationTransaction
 					).ConfigureAwait( false );
 		}
 	}

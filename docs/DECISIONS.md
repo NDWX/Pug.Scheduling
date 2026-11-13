@@ -392,13 +392,31 @@ type); each worker claims, executes and reports one job at a time.
   no due work) carry `{Claimant}/{Worker}` and the group's `{JobType}` (`any` when unfiltered); job
   lines keep the job's `{JobType}`.
 
+## D21 — Lease arbitration runs READ COMMITTED (defect found by the Postgres tests)
+
+`Pug.Application.Data`'s `ExecuteAsync`/`PerformAsync` open a default `TransactionScope`, whose
+isolation is **Serializable**, and Npgsql enlists at `SERIALIZABLE`. There the losing side of a
+lease race does not see its conditional upsert affect no rows: Postgres fails it with `40001:
+could not serialize access due to concurrent update`, so a coordinator that lost a claim race threw
+instead of moving to the next candidate. SQLite serializes writers and never showed it.
+`DatabaseExecutionLeaseProvider` now runs every operation in its own (`RequiresNew`) READ COMMITTED
+transaction — the semantics the single-statement arbitration (D6) was written for — and lease
+state is never committed as part of a caller's transaction.
+
+The schedule store still runs at the default Serializable. Its writes are serialized by the lease,
+so no test races them; a completion racing an adoption of the same run could surface `40001` rather
+than `ClaimNotHeldException`.
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**
-`dotnet test tests/Pug.Scheduling.Tests` green. Tests run against real SQLite stores (per-fixture
-temp DB, DbUp-migrated from `GetSchemaUpgradeScripts()`, WAL + busy_timeout). **No Docker on this
-machine**: Postgres providers (schedule + lease stores) are build-verified only — SQL differs
-from tested SQLite only in DDL types and boolean predicates; run Testcontainers races in CI.
+`dotnet test tests/Pug.Scheduling.Tests` green. The store-backed suites (lease provider,
+coordinator, scheduler, worker groups) are generic over fixture interfaces and run against both
+providers: SQLite (per-fixture temp DB, DbUp-migrated from `GetSchemaUpgradeScripts()`, WAL +
+busy_timeout) and PostgreSQL via Testcontainers (one `postgres:17-alpine` container per test run,
+a DbUp-migrated database per fixture). The Postgres classes carry `[Trait( "Category", "Postgres" )]`
+and need Docker (on this machine: `sg docker -c "dotnet test tests/Pug.Scheduling.Tests"`); without
+Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
 
 ## Phase status (per approved plan; pause for user review after every sub-phase)
 
@@ -412,8 +430,11 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
   window, schema v2 index) and coordinator logging — DONE (107 tests)**; **B job-handler projects /
   factory registry / no dispatcher (D19, 123 tests) — DONE**; **C worker groups, host-wide
   numbering, per-worker management (D20, 154 tests) — DONE**.
-- **Phase 1 COMPLETE.** Carry-overs: Postgres Testcontainers races in CI; webhook dispatch (D14, superseded by D19:
-  a webhook is now a handler) still deferred.
+- **Postgres test coverage (#3)** — store-backed suites on both providers, Postgres via
+  Testcontainers, plus a many-coordinators claim race; lease arbitration fixed to READ COMMITTED
+  (D21) — **DONE (210 tests: 155 SQLite/other, 55 Postgres)**.
+- **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
+  handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).
 - **Phase 3** SaaS integration (handler + `IEmailSender`/MailKit + `IEmailSenderProvider`,
   recipient policy, output store, link-first delivery ≤ 5 MB attachments, owner impersonation at

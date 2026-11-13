@@ -10,8 +10,11 @@ using Pug.Scheduling.Tests.Infrastructure;
 namespace Pug.Scheduling.Tests;
 
 // Claim / misfire / retry / completion state machine of the execution coordinator, exercised
-// against real SQLite schedule and lease stores.
-public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>, IClassFixture<LeaseDatabaseFixture>
+// against real schedule and lease stores of each provider by the subclasses below. They declare
+// the class fixtures: two IClassFixture<T> over type parameters could unify (CS0695).
+public abstract class ExecutionCoordinatorTests<TScheduleDatabase, TLeaseDatabase>
+	where TScheduleDatabase : class, IScheduleDatabaseFixture
+	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
 	private const string Domain = "tenant-1";
 	private const string Claimant = "worker-1";
@@ -21,11 +24,11 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 	// or leased never reach it.
 	private readonly string _jobType = $"test-{Guid.NewGuid():N}";
 
-	private readonly ScheduleDatabaseFixture _scheduleDatabase;
+	private readonly TScheduleDatabase _scheduleDatabase;
 	private readonly IExecutionLeaseProvider _leaseProvider;
 	private readonly ExecutionCoordinator _coordinator;
 
-	public ExecutionCoordinatorTests( ScheduleDatabaseFixture scheduleDatabase, LeaseDatabaseFixture leaseDatabase )
+	protected ExecutionCoordinatorTests( TScheduleDatabase scheduleDatabase, TLeaseDatabase leaseDatabase )
 	{
 		_scheduleDatabase = scheduleDatabase;
 		_leaseProvider = new DatabaseExecutionLeaseProvider( leaseDatabase.ApplicationData );
@@ -171,6 +174,73 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 				second.ClaimDueJobAsync( "worker-b", 1, _jobType ) );
 
 		Assert.Equal( 1, claims.Count( job => job?.Context.Schedule == schedule ) );
+	}
+
+	[Fact]
+	public async Task ManyCoordinatorsRacingOverManySchedulesClaimEachExactlyOnce()
+	{
+		const int scheduleCount = 12;
+		const int coordinatorCount = 6;
+
+		HashSet<string> schedules = new();
+
+		for( int index = 0; index < scheduleCount; index++ )
+			schedules.Add( await InsertScheduleAsync( DateTime.UtcNow.AddSeconds( -1 - index ) ) );
+
+		// Every coordinator sees every due schedule, so one coming back empty means all are taken.
+		ExecutionCoordinatorOptions options = new() { ClaimCandidates = scheduleCount };
+
+		TaskCompletionSource start = new( TaskCreationOptions.RunContinuationsAsynchronously );
+
+		// Each claim of a racer is made by a fresh worker number: a holder re-takes its own live
+		// lease, so one worker claiming repeatedly would get its first job back forever. The bound
+		// stops a racer that claims more than there is; the count assertion then fails.
+		Task<List<(string Holder, ClaimedJob Job)>>[] racers =
+			Enumerable.Range( 0, coordinatorCount )
+					.Select(
+							index => Task.Run(
+									async () =>
+									{
+										string claimant = $"racer-{index}";
+
+										ExecutionCoordinator coordinator = CreateCoordinator(
+												$"run-racer-{index}",
+												SecurityManagerFactory.CreateAlwaysAuthorized( claimant ), options );
+
+										List<(string, ClaimedJob)> claimed = new();
+
+										await start.Task;
+
+										for( int worker = 1; worker <= scheduleCount + 1; worker++ )
+										{
+											ClaimedJob? job = await coordinator.ClaimDueJobAsync( claimant, worker, _jobType );
+
+											if( job is null )
+												break;
+
+											claimed.Add( ( $"{claimant}/{worker}", job ) );
+										}
+
+										return claimed;
+									} ) )
+					.ToArray();
+
+		start.SetResult();
+
+		(string Holder, ClaimedJob Job)[] claims =
+			( await Task.WhenAll( racers ) ).SelectMany( claimed => claimed ).ToArray();
+
+		Assert.Equal( scheduleCount, claims.Length );
+		Assert.True( schedules.SetEquals( claims.Select( claim => claim.Job.Context.Schedule ) ) );
+
+		foreach( (string holder, ClaimedJob job) in claims )
+		{
+			ScheduleRun run = Assert.Single( await GetRunsAsync( job.Context.Schedule ) );
+
+			Assert.Equal( job.Context.Run, run.Identifier );
+			Assert.Equal( holder, run.ClaimedBy );
+			Assert.Equal( holder, ( await _leaseProvider.GetAsync( job.Context.Schedule ) ).ClaimedBy );
+		}
 	}
 
 	[Fact]
@@ -681,5 +751,28 @@ public class ExecutionCoordinatorTests : IClassFixture<ScheduleDatabaseFixture>,
 		Assert.Equal( advanced.State.NextRun, after.State.NextRun );
 		Assert.Equal( advanced.State.Attempt, after.State.Attempt );
 		Assert.Equal( RunResults.Succeeded, Assert.Single( await GetRunsAsync( schedule ) ).Result );
+	}
+}
+
+public sealed class SqliteExecutionCoordinatorTests
+	: ExecutionCoordinatorTests<SqliteScheduleDatabaseFixture, SqliteLeaseDatabaseFixture>,
+		IClassFixture<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteLeaseDatabaseFixture>
+{
+	public SqliteExecutionCoordinatorTests( SqliteScheduleDatabaseFixture scheduleDatabase,
+											SqliteLeaseDatabaseFixture leaseDatabase )
+		: base( scheduleDatabase, leaseDatabase )
+	{
+	}
+}
+
+[Trait( "Category", "Postgres" )]
+public sealed class PostgresExecutionCoordinatorTests
+	: ExecutionCoordinatorTests<PostgresScheduleDatabaseFixture, PostgresLeaseDatabaseFixture>,
+		IClassFixture<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresLeaseDatabaseFixture>
+{
+	public PostgresExecutionCoordinatorTests( PostgresScheduleDatabaseFixture scheduleDatabase,
+											PostgresLeaseDatabaseFixture leaseDatabase )
+		: base( scheduleDatabase, leaseDatabase )
+	{
 	}
 }

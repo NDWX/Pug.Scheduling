@@ -7,16 +7,21 @@ using Pug.Scheduling.Tests.Infrastructure;
 
 namespace Pug.Scheduling.Tests;
 
-public class SchedulerTests : IClassFixture<ScheduleDatabaseFixture>, IClassFixture<LeaseDatabaseFixture>
+// The scheduler facade over real schedule and lease stores, run against each provider by the
+// subclasses below. They declare the class fixtures: two IClassFixture<T> over type parameters
+// could unify (CS0695).
+public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
+	where TScheduleDatabase : class, IScheduleDatabaseFixture
+	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
 	private const string Domain = "tenant-1";
 	private const string OwnerUser = "owner-1";
 
-	private readonly ScheduleDatabaseFixture _scheduleDatabase;
+	private readonly TScheduleDatabase _scheduleDatabase;
 	private readonly IScheduler _scheduler;
 	private readonly IExecutionLeaseProvider _leaseProvider;
 
-	public SchedulerTests( ScheduleDatabaseFixture scheduleDatabase, LeaseDatabaseFixture leaseDatabase )
+	protected SchedulerTests( TScheduleDatabase scheduleDatabase, TLeaseDatabase leaseDatabase )
 	{
 		_scheduleDatabase = scheduleDatabase;
 		_leaseProvider = new DatabaseExecutionLeaseProvider( leaseDatabase.ApplicationData );
@@ -201,5 +206,24 @@ public class SchedulerTests : IClassFixture<ScheduleDatabaseFixture>, IClassFixt
 						NewDefinition( recurrence: new Recurrence { TimeZone = "Etc/UTC" } ) ) );
 
 		await Assert.ThrowsAsync<UnknownScheduleException>( () => _scheduler.GetScheduleAsync( "missing" ) );
+	}
+}
+
+public sealed class SqliteSchedulerTests : SchedulerTests<SqliteScheduleDatabaseFixture, SqliteLeaseDatabaseFixture>,
+		IClassFixture<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteLeaseDatabaseFixture>
+{
+	public SqliteSchedulerTests( SqliteScheduleDatabaseFixture scheduleDatabase, SqliteLeaseDatabaseFixture leaseDatabase )
+		: base( scheduleDatabase, leaseDatabase )
+	{
+	}
+}
+
+[Trait( "Category", "Postgres" )]
+public sealed class PostgresSchedulerTests : SchedulerTests<PostgresScheduleDatabaseFixture, PostgresLeaseDatabaseFixture>,
+		IClassFixture<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresLeaseDatabaseFixture>
+{
+	public PostgresSchedulerTests( PostgresScheduleDatabaseFixture scheduleDatabase, PostgresLeaseDatabaseFixture leaseDatabase )
+		: base( scheduleDatabase, leaseDatabase )
+	{
 	}
 }

@@ -5,19 +5,20 @@ using Pug.Scheduling.Tests.Infrastructure;
 
 namespace Pug.Scheduling.Tests;
 
-// Arbitration semantics of the database-backed execution-lease provider, exercised against the
-// SQLite lease store. The Postgres session uses the same single-statement conditional upsert, so
-// these tests define the behavior contract for both providers.
-public class ExecutionLeaseProviderTests : IClassFixture<LeaseDatabaseFixture>
+// Arbitration semantics of the database-backed execution-lease provider: the behavior contract of
+// every lease store, run against each provider's store by the subclasses below (Postgres in a
+// Testcontainers database, so the concurrent-acquisition race meets real row locking).
+public abstract class ExecutionLeaseProviderTests<TLeaseDatabase> : IClassFixture<TLeaseDatabase>
+	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
-	private readonly LeaseDatabaseFixture _fixture;
+	private readonly TLeaseDatabase _fixture;
 	private readonly DatabaseExecutionLeaseProvider _provider;
 
 	private static readonly DateTime FutureExpiry = DateTime.UtcNow.AddMinutes( 10 );
 	private static readonly DateTime FartherFutureExpiry = DateTime.UtcNow.AddMinutes( 20 );
 	private static readonly DateTime PastExpiry = DateTime.UtcNow.AddMinutes( -10 );
 
-	public ExecutionLeaseProviderTests( LeaseDatabaseFixture fixture )
+	protected ExecutionLeaseProviderTests( TLeaseDatabase fixture )
 	{
 		_fixture = fixture;
 		_provider = new DatabaseExecutionLeaseProvider( fixture.ApplicationData );
@@ -170,10 +171,23 @@ public class ExecutionLeaseProviderTests : IClassFixture<LeaseDatabaseFixture>
 	{
 		string schedule = NewSchedule();
 
+		// Released together from pool threads: started inline, the attempts would run one after
+		// another up to their first real await (the session opens its connection synchronously).
+		TaskCompletionSource start = new( TaskCreationOptions.RunContinuationsAsynchronously );
+
 		Task<bool>[] attempts =
 			Enumerable.Range( 0, 8 )
-					.Select( worker => _provider.TryAcquireAsync( schedule, $"worker-{worker}", FutureExpiry ) )
+					.Select(
+							worker => Task.Run(
+									async () =>
+									{
+										await start.Task;
+
+										return await _provider.TryAcquireAsync( schedule, $"worker-{worker}", FutureExpiry );
+									} ) )
 					.ToArray();
+
+		start.SetResult();
 
 		bool[] results = await Task.WhenAll( attempts );
 
@@ -182,5 +196,20 @@ public class ExecutionLeaseProviderTests : IClassFixture<LeaseDatabaseFixture>
 		ExecutionLease lease = await _provider.GetAsync( schedule );
 
 		Assert.NotNull( lease );
+	}
+}
+
+public sealed class SqliteExecutionLeaseProviderTests : ExecutionLeaseProviderTests<SqliteLeaseDatabaseFixture>
+{
+	public SqliteExecutionLeaseProviderTests( SqliteLeaseDatabaseFixture fixture ) : base( fixture )
+	{
+	}
+}
+
+[Trait( "Category", "Postgres" )]
+public sealed class PostgresExecutionLeaseProviderTests : ExecutionLeaseProviderTests<PostgresLeaseDatabaseFixture>
+{
+	public PostgresExecutionLeaseProviderTests( PostgresLeaseDatabaseFixture fixture ) : base( fixture )
+	{
 	}
 }
