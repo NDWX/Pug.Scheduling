@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -27,14 +28,16 @@ public static class ExecutionCoordinatorEndpoints
 	/// </summary>
 	public static IEndpointRouteBuilder MapExecutionCoordinatorEndpoints( this IEndpointRouteBuilder routes )
 	{
-		routes.MapPost( "executionCoordinator/JobRunClaims", ClaimDueJobs )
+		routes.MapPost( "executionCoordinator/JobRunClaims", ClaimDueJob )
 			.RequireAuthorization()
-			.WithName( "ClaimDueJobs" )
+			.WithName( "ClaimDueJob" )
 #if NET7_0_OR_GREATER
 			.WithTags( "ExecutionCoordinator" )
-			.WithSummary( "Claim due job runs for a worker" )
+			.WithSummary( "Claim a due job run for a worker" )
 #endif
-			.Produces<IEnumerable<ClaimedJob>>( StatusCodes.Status200OK )
+			.Produces<ClaimedJob>( StatusCodes.Status200OK )
+			// Nothing due is an expected outcome of a poll, not a failure.
+			.Produces( StatusCodes.Status204NoContent )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
@@ -77,7 +80,28 @@ public static class ExecutionCoordinatorEndpoints
 				}
 			);
 
-	private static async Task<IResult> ClaimDueJobs(
+	// The worker number arrives as a query string; it is parsed here rather than bound as int so
+	// that an omitted or malformed value reaches the caller as a structured BadRequestResultInfo
+	// instead of model binding failing with an empty 400 body.
+	private static IResult? ParseCaller( string? claimant, string? worker, out int workerNumber )
+	{
+		workerNumber = 0;
+
+		if( string.IsNullOrEmpty( claimant ) )
+			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(claimant) ) );
+
+		if( string.IsNullOrEmpty( worker ) )
+			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(worker) ) );
+
+		if( !int.TryParse( worker, NumberStyles.None, CultureInfo.InvariantCulture, out workerNumber ) )
+			return Results.BadRequest(
+					new BadRequestResultInfo(
+							"INVALID_ARGUMENT", nameof(worker), "Worker number must be a positive integer." ) );
+
+		return null;
+	}
+
+	private static async Task<IResult> ClaimDueJob(
 		[FromBody] JobRunClaimRequest? request,
 		[FromServices] IExecutionCoordinator coordinator )
 	{
@@ -90,11 +114,13 @@ public static class ExecutionCoordinatorEndpoints
 
 		try
 		{
-			IEnumerable<ClaimedJob> claimed =
-				await coordinator.ClaimDueJobsAsync( request.Claimant, request.MaximumJobs )
+			ClaimedJob? claimed =
+				await coordinator.ClaimDueJobAsync(
+									request.Claimant, request.Worker,
+									string.IsNullOrEmpty( request.JobType ) ? null : request.JobType )
 								.ConfigureAwait( false );
 
-			return Results.Ok( claimed );
+			return claimed is null ? Results.NoContent() : Results.Ok( claimed );
 		}
 		catch( NotAuthorized )
 		{
@@ -108,15 +134,19 @@ public static class ExecutionCoordinatorEndpoints
 
 	private static async Task<IResult> RenewClaim(
 		[FromRoute] string run,
+		[FromQuery] string? claimant,
 		[FromQuery] string? worker,
 		[FromServices] IExecutionCoordinator coordinator )
 	{
-		if( string.IsNullOrEmpty( worker ) )
-			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(worker) ) );
+		IResult? invalid = ParseCaller( claimant, worker, out int workerNumber );
+
+		if( invalid is not null )
+			return invalid;
 
 		try
 		{
-			return Results.Ok( await coordinator.RenewClaimAsync( run, worker ).ConfigureAwait( false ) );
+			return Results.Ok(
+					await coordinator.RenewClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) );
 		}
 		catch( NotAuthorized )
 		{
@@ -130,19 +160,23 @@ public static class ExecutionCoordinatorEndpoints
 
 	private static async Task<IResult> ReportCompletion(
 		[FromRoute] string run,
+		[FromQuery] string? claimant,
 		[FromQuery] string? worker,
 		[FromBody] JobRunCompletion? completion,
 		[FromServices] IExecutionCoordinator coordinator )
 	{
-		if( string.IsNullOrEmpty( worker ) )
-			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(worker) ) );
+		IResult? invalid = ParseCaller( claimant, worker, out int workerNumber );
+
+		if( invalid is not null )
+			return invalid;
 
 		if( completion is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(completion) ) );
 
 		try
 		{
-			await coordinator.ReportCompletionAsync( run, worker, completion.Result, completion.Outcome )
+			await coordinator.ReportCompletionAsync(
+								run, claimant!, workerNumber, completion.Result, completion.Outcome )
 							.ConfigureAwait( false );
 
 			return Results.Ok();

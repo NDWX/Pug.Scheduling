@@ -17,7 +17,8 @@ namespace Pug.Scheduling.DependencyInjection
 		/// already registered <see cref="IApplicationData{IDataSession}"/> for the schedule store
 		/// (a concrete provider such as the Postgres or SQLite <c>DapperData</c>),
 		/// <see cref="IExecutionLeaseProvider"/> (e.g. <c>DatabaseExecutionLeaseProvider</c> over
-		/// its own lease store), and <see cref="ISecurityManager"/>.
+		/// its own lease store), <see cref="ISecurityManager"/>, and logging
+		/// (<see cref="ILogger{TCategoryName}"/>, e.g. via <c>AddLogging()</c>).
 		/// </summary>
 		public static IServiceCollection AddScheduling( this IServiceCollection serviceCollection,
 														IdentifierGenerator identifierGenerator,
@@ -49,7 +50,8 @@ namespace Pug.Scheduling.DependencyInjection
 							provider.GetRequiredService<IApplicationData<IDataSession>>(),
 							provider.GetRequiredService<IExecutionLeaseProvider>(),
 							provider.GetRequiredService<ISecurityManager>(),
-							coordinatorOptions ?? new ExecutionCoordinatorOptions()
+							coordinatorOptions ?? new ExecutionCoordinatorOptions(),
+							provider.GetRequiredService<ILogger<ExecutionCoordinator>>()
 						)
 				);
 

@@ -276,15 +276,26 @@ namespace Pug.Scheduling.Data.SQLite
 				);
 		}
 
-		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, int maximumSchedules )
+		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules )
 		{
+			// Two statements rather than '@jobType is null or jobType = @jobType': a null
+			// parameter carries no type, which Npgsql rejects, and the unfiltered read keeps the
+			// plain due-index plan.
+			string sql = jobType is null
+							? $@"select {ScheduleColumns} from schedule
+									where enabled = 1 and paused = 0
+										and nextRun is not null and nextRun <= @dueBy
+									order by nextRun
+									limit @maximumSchedules;"
+							: $@"select {ScheduleColumns} from schedule
+									where enabled = 1 and paused = 0
+										and jobType = @jobType
+										and nextRun is not null and nextRun <= @dueBy
+									order by nextRun
+									limit @maximumSchedules;";
+
 			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
-													$@"select {ScheduleColumns} from schedule
-														where enabled = 1 and paused = 0
-															and nextRun is not null and nextRun <= @dueBy
-														order by nextRun
-														limit @maximumSchedules;",
-													new { dueBy, maximumSchedules }
+													sql, new { dueBy, jobType, maximumSchedules }
 												).ConfigureAwait( false );
 
 			return rows.Select( Compose ).ToList();

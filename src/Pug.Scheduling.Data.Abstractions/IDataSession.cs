@@ -46,10 +46,10 @@ namespace Pug.Scheduling.Data.Abstractions
 		// == Execution operations (ExecutionCoordinator) ==
 
 		// Schedules that are enabled, not paused, and due (NextRun elapsed by dueBy), ordered by
-		// NextRun. A plain read with no claim semantics: exclusive execution is arbitrated by
-		// IExecutionLeaseProvider, so concurrent coordinators may read overlapping candidates
-		// and race for the lease.
-		Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, int maximumSchedules );
+		// NextRun, restricted to jobType when it is not null. A plain read with no claim
+		// semantics: exclusive execution is arbitrated by IExecutionLeaseProvider, so concurrent
+		// coordinators may read overlapping candidates and race for the lease.
+		Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules );
 
 		Task InsertRunAsync( ScheduleRun run );
 

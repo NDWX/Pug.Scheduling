@@ -19,6 +19,10 @@ namespace Pug.Scheduling.Worker
 	/// </summary>
 	public sealed class SchedulerWorker : BackgroundService, ISchedulerWorker
 	{
+		// The worker's number within its claimant group. One worker per claimant until worker
+		// groups arrive; the coordinator holds this worker's claims as "Claimant/1".
+		private const int WorkerNumber = 1;
+
 		private readonly IExecutionCoordinator _coordinator;
 		private readonly IScheduledJobDispatcher _dispatcher;
 		private readonly WorkerOptions _options;
@@ -44,9 +48,6 @@ namespace Pug.Scheduling.Worker
 
 			if( string.IsNullOrWhiteSpace( _options.Claimant ) )
 				throw new ArgumentException( "Worker claimant name is required.", nameof(options) );
-
-			if( _options.MaximumConcurrentJobs < 1 )
-				throw new ArgumentException( "At least one concurrent job is required.", nameof(options) );
 
 			_logger = logger ?? throw new ArgumentNullException( nameof(logger) );
 		}
@@ -110,27 +111,25 @@ namespace Pug.Scheduling.Worker
 					continue;
 				}
 
-				List<ClaimedJob> jobs = new();
+				ClaimedJob job = null;
 
 				try
 				{
-					jobs.AddRange(
-							await _coordinator.ClaimDueJobsAsync( _options.Claimant, _options.MaximumConcurrentJobs )
-											.ConfigureAwait( false )
-						);
+					job = await _coordinator.ClaimDueJobAsync( _options.Claimant, WorkerNumber, null )
+											.ConfigureAwait( false );
 				}
 				catch( Exception exception )
 				{
-					_logger.LogError( exception, "Worker {Claimant} failed to claim due jobs.", _options.Claimant );
+					_logger.LogError( exception, "Worker {Claimant} failed to claim a due job.", _options.Claimant );
 				}
 
 				lock( _stateLock )
 					_lastPoll = DateTime.UtcNow;
 
-				if( jobs.Count > 0 )
+				if( job is not null )
 				{
-					await Task.WhenAll( jobs.Select( job => ProcessJobAsync( job, stoppingToken ) ) )
-							.ConfigureAwait( false );
+					// One job at a time: the next claim waits for this one to finish.
+					await ProcessJobAsync( job, stoppingToken ).ConfigureAwait( false );
 
 					// More work may already be due; poll again immediately.
 					continue;
@@ -254,7 +253,8 @@ namespace Pug.Scheduling.Worker
 
 				try
 				{
-					await _coordinator.ReportCompletionAsync( job.Context.Run, _options.Claimant, result, outcome )
+					await _coordinator.ReportCompletionAsync(
+										job.Context.Run, _options.Claimant, WorkerNumber, result, outcome )
 									.ConfigureAwait( false );
 				}
 				catch( Exception exception )
@@ -285,7 +285,7 @@ namespace Pug.Scheduling.Worker
 
 					try
 					{
-						renewed = await _coordinator.RenewClaimAsync( job.Context.Run, _options.Claimant )
+						renewed = await _coordinator.RenewClaimAsync( job.Context.Run, _options.Claimant, WorkerNumber )
 													.ConfigureAwait( false );
 					}
 					catch( Exception exception )

@@ -59,11 +59,27 @@ pause; elapsed occurrences are evaluated against the misfire policy by the coord
 ## D5 — Workers never touch the data backend (user directive)
 
 Regardless of hosting model, workers poll/claim/heartbeat/report exclusively through
-`IExecutionCoordinator` (`ClaimDueJobsAsync → ClaimedJob { Context, Timeout, ClaimExpiry }`,
-`RenewClaimAsync`, `ReportCompletionAsync( run, claimant, result, outcome )`). Due-ness, claim
-semantics, misfire, retry, and next-occurrence computation are all invisible to workers. An
-externally hosted worker binds the same interface to a transport client (future); the schedule
-store's `GetDueSchedulesAsync` is a plain read — concurrent coordinators race for leases.
+`IExecutionCoordinator`:
+
+```csharp
+Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string jobType ); // null = none due
+Task<bool> RenewClaimAsync( string run, string claimant, int worker );
+Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome );
+```
+
+`ClaimedJob { Context, Timeout, ClaimExpiry }`. A claim returns **one** job (the worker runs one
+at a time; a batch claim let one slow job idle the rest of the batch); `jobType` null means any
+type. Caller identity (`claimant`, `worker`) is D16's. Due-ness, claim semantics, misfire, retry,
+and next-occurrence computation are all invisible to workers. An externally hosted worker binds
+the same interface to a transport client (D17). The schedule store's
+`GetDueSchedulesAsync( dueBy, jobType, maximumSchedules )` is a plain read — concurrent
+coordinators race for leases. The coordinator reads a window of
+`ExecutionCoordinatorOptions.ClaimCandidates` (default 10) due schedules and returns the first
+whose lease it acquires and that is not disposed of (misfire SKIP, stale read): losing the race for
+the oldest due schedule moves on to the next instead of coming back empty while work is due. The
+job-type filter is a separate SQL statement, not `@jobType is null or …` (an untyped null
+parameter is rejected by Npgsql), served by the schema-v2 partial index
+`ixScheduleJobTypeDue on schedule(jobType, nextRun)`.
 
 ## D6 — Lease claiming is its own abstraction with its own store (user directive)
 
@@ -157,17 +173,21 @@ scheduler host serves more than one scheduling surface at once (user directive).
 | Extension | Package | Routes |
 |---|---|---|
 | `MapSchedulingEndpoints()` | `Pug.Scheduling.WebApi` | `GET/POST schedules`, `GET/PUT/DELETE schedules/{identifier}`, `POST schedules/{identifier}/pause|resume|run`, `GET schedules/{identifier}/runs` |
-| `MapExecutionCoordinatorEndpoints()` | `Pug.Scheduling.WebApi` | `POST executionCoordinator/JobRunClaims`, `POST executionCoordinator/JobRuns/{run}/leaseRenewal?worker=`, `POST executionCoordinator/JobRuns/{run}/completion?worker=` |
+| `MapExecutionCoordinatorEndpoints()` | `Pug.Scheduling.WebApi` | `POST executionCoordinator/JobRunClaims`, `POST executionCoordinator/JobRuns/{run}/leaseRenewal?claimant=&worker=`, `POST executionCoordinator/JobRuns/{run}/completion?claimant=&worker=` |
 | `MapSchedulerWorkerEndpoints()` | `Pug.Scheduling.Worker.WebApi` | `GET worker`, `POST worker/pause|resume` |
 
 - **Coordinator endpoints are the out-of-process worker's transport** (user directive): the wire
   contract is `IExecutionCoordinator` unchanged, so D5 holds over HTTP — a remote worker still
   never reaches the data backend, and due-ness/misfire/retry/next-occurrence stay behind the
-  facade. Request bodies `JobRunClaimRequest { Claimant, MaximumJobs }` and
+  facade. Request bodies `JobRunClaimRequest { Claimant, Worker, JobType }` (`JobType` optional) and
   `JobRunCompletion { Result, Outcome }` live in **`Pug.Scheduling.WebApi.Models`** (see D17): HTTP
   surface contracts, not domain models — nothing but the transport uses them — and deliberately
-  outside the ASP.NET-referencing WebApi packages so a worker host's client never pulls those in. Renewal answers `200` with
-  the coordinator's boolean: a lost claim is an expected heartbeat outcome, not a request failure.
+  outside the ASP.NET-referencing WebApi packages so a worker host's client never pulls those in. A claim answers `200` with
+  the `ClaimedJob`, or `204` when nothing is due (the client maps it back to null). Renewal answers
+  `200` with the coordinator's boolean: a lost claim is an expected heartbeat outcome, not a request
+  failure. Renewal and completion identify the caller by query `claimant` and `worker`; the worker
+  number is parsed by the handler, so an omitted or malformed one is a structured 400 like any
+  other.
 - **Worker management endpoints are their own package** `Pug.Scheduling.Worker.WebApi` (user
   directive): a worker hosted out-of-process reaches the scheduler solely through the coordinator
   transport and must not have to reference packages it does not need.
@@ -200,6 +220,26 @@ on `SecurityObjectTypes.ExecutionCoordinator` qualified by the **claimant identi
 as** (`ResourceQualifiers.ExecutionCoordinator`), so one worker's credentials cannot claim, renew,
 or complete runs as another. There is no owner rule: execution is an operator concern, not the
 schedule owner's.
+
+**Claimant is the group identity; the lease holder is the worker** (rework sub-phase A). Every
+coordinator call carries `claimant` and `worker` (a number, 1 or greater). Grants are qualified by
+the claimant alone, so every worker of a group shares them; the lease is held as
+`"{claimant}/{worker}"`, composed inside `ExecutionCoordinator` and handed to
+`IExecutionLeaseProvider` unchanged, so two workers of one group never share a claim. `/` is
+therefore reserved: a claimant containing one, or a worker below 1, is an `ArgumentException`
+(400 over HTTP). A restarted worker presenting the same claimant and number is the same holder: the
+lease store lets a holder re-take its own live lease, and the coordinator adopts the unfinished run
+(D9) rather than recording a duplicate — restart takeover needs no lease-provider change. The
+corollary is that worker numbers must be unique within a claimant across live processes.
+
+`ExecutionCoordinator` logs its transitions through `ILogger<ExecutionCoordinator>` with structured
+`{Claimant}`, `{Worker}`, `{Schedule}`, `{Run}`, `{ScheduledFor}`, `{Attempt}`: claims, adoptions,
+completions, retries and misfire skips at Information; lost lease races, no due work and computed
+next occurrences at Debug; authorization denials, renewals or completions from a worker that no
+longer holds the claim, and stale due candidates at Warning; a failure preparing a claimed job at
+Error, before its lease is released and the error rethrown. A completion from a worker that no
+longer holds the claim is still recorded, as before — the warning makes the possible double
+execution visible, it does not refuse it.
 
 **A call arriving with no principal at all is trusted and skips the check** (user directive).
 Every endpoint in front of the coordinator requires an authenticated caller before dispatch, so a
@@ -268,6 +308,10 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
   · **1e WebApi (schedule, execution coordinator and worker endpoints, 29 endpoint tests; 75
   total) — DONE**
   · **1f `.Client` (both facades), packaging metadata, README — DONE (88 tests)**
+- **Execution rework** (plan: single-job workers, no dispatcher, worker groups):
+  **A coordinator contract (`claimant` + `worker`, one job per claim, job-type filter, candidate
+  window, schema v2 index) and coordinator logging — DONE (107 tests)**; B job-handler projects /
+  factory registry / no dispatcher, C worker groups and per-worker management — pending.
 - **Phase 1 COMPLETE.** Carry-overs: Postgres Testcontainers races in CI; webhook dispatch (D14)
   still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).

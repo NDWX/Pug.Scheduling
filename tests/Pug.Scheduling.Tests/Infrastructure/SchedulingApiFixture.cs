@@ -94,7 +94,12 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 						);
 				} );
 
-		services.AddScheduling( new SequentialIdGenerator( "schedule" ) );
+		// Every test of a class shares this database, and claims they leave live stay ahead of
+		// newer due work in the candidate window; a wide window keeps one test's leftovers from
+		// starving the next test's claim.
+		services.AddScheduling(
+				new SequentialIdGenerator( "schedule" ),
+				coordinatorOptions: new ExecutionCoordinatorOptions { ClaimCandidates = 100 } );
 		services.AddSchedulableJobType( JobType );
 
 		services.AddSingleton<ISchedulerWorker>( Worker );

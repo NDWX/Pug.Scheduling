@@ -18,22 +18,32 @@ public class SchedulerWorkerTests
 		public TaskCompletionSource<(string Run, string Result, JobOutcome Outcome)> Reported { get; } =
 			new( TaskCreationOptions.RunContinuationsAsynchronously );
 
+		// The caller identity of the claim that handed out the job.
+		public (string Claimant, int Worker, string? JobType)? ClaimedBy { get; private set; }
+
+		public (string Claimant, int Worker)? ReportedBy { get; private set; }
+
 		public FakeCoordinator( ClaimedJob job )
 		{
 			_job = job;
 		}
 
-		public Task<IEnumerable<ClaimedJob>> ClaimDueJobsAsync( string claimant, int maximumJobs )
+		public Task<ClaimedJob?> ClaimDueJobAsync( string claimant, int worker, string? jobType )
 		{
 			ClaimedJob? job = Interlocked.Exchange( ref _job, null );
 
-			return Task.FromResult<IEnumerable<ClaimedJob>>( job is null ? Array.Empty<ClaimedJob>() : new[] { job } );
+			if( job is not null )
+				ClaimedBy = ( claimant, worker, jobType );
+
+			return Task.FromResult( job );
 		}
 
-		public Task<bool> RenewClaimAsync( string run, string claimant ) => Task.FromResult( true );
+		public Task<bool> RenewClaimAsync( string run, string claimant, int worker ) => Task.FromResult( true );
 
-		public Task ReportCompletionAsync( string run, string claimant, string result, JobOutcome outcome )
+		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
 		{
+			ReportedBy = ( claimant, worker );
+
 			Reported.TrySetResult( ( run, result, outcome ) );
 
 			return Task.CompletedTask;
@@ -91,6 +101,10 @@ public class SchedulerWorkerTests
 		Assert.Equal( "run-1", run );
 		Assert.Equal( RunResults.Succeeded, result );
 		Assert.True( outcome.Successful );
+
+		// A lone worker claims any job type as worker 1 of its claimant, and reports as the same.
+		Assert.Equal( ( "test-worker", 1, (string?)null ), coordinator.ClaimedBy );
+		Assert.Equal( ( "test-worker", 1 ), coordinator.ReportedBy );
 	}
 
 	[Fact]

@@ -19,6 +19,12 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	private const string Worker = "remote-client-worker";
 	private const string OtherWorker = "remote-client-worker-2";
 
+	// Above 1, which the SchedulerWorker below claims as: each test claims as a worker number of
+	// its own, so claims another test left live are never handed back to it.
+	private static int _lastWorkerNumber = 100;
+
+	private readonly int _worker = Interlocked.Increment( ref _lastWorkerNumber );
+
 	private readonly SchedulingApiFixture _fixture;
 	private readonly IScheduler _scheduler;
 	private readonly IExecutionCoordinator _coordinator;
@@ -60,9 +66,10 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	{
 		string identifier = await RegisterDueScheduleAsync( "Remotely claimed" );
 
-		ClaimedJob job = Assert.Single(
-				await _coordinator.ClaimDueJobsAsync( Worker, 10 ),
-				claimed => claimed.Context.Schedule == identifier );
+		ClaimedJob? job = await _coordinator.ClaimDueJobAsync( Worker, _worker, null );
+
+		Assert.NotNull( job );
+		Assert.Equal( identifier, job.Context.Schedule );
 
 		// The execution context a worker hands its job handler survives the wire intact.
 		Assert.Equal( SchedulingApiFixture.Domain, job.Context.Domain );
@@ -72,10 +79,10 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 		Assert.Equal( TimeSpan.FromMinutes( 10 ), job.Timeout );
 		Assert.True( job.ClaimExpiry > DateTime.UtcNow );
 
-		Assert.True( await _coordinator.RenewClaimAsync( job.Context.Run, Worker ) );
+		Assert.True( await _coordinator.RenewClaimAsync( job.Context.Run, Worker, _worker ) );
 
 		await _coordinator.ReportCompletionAsync(
-				job.Context.Run, Worker, RunResults.Succeeded,
+				job.Context.Run, Worker, _worker, RunResults.Succeeded,
 				new JobOutcome { Successful = true, Details = /*lang=json*/ """{"output":"report-1.pdf"}""" } );
 
 		ScheduleRun run = Assert.Single( await _scheduler.GetRunsAsync( identifier ) );
@@ -93,8 +100,23 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	[Fact]
 	public async Task NothingDueClaimsNothing()
 	{
-		// An empty claim must come back as an empty collection, not as a failure.
-		Assert.Empty( await _coordinator.ClaimDueJobsAsync( Worker, 10 ) );
+		// Nothing due (204) must come back as null, not as a failure. A job type nothing is
+		// scheduled under keeps due work other tests left behind from answering.
+		Assert.Null( await _coordinator.ClaimDueJobAsync( Worker, _worker, "no-such-type" ) );
+	}
+
+	[Fact]
+	public async Task InvalidCallerSurfacesAsArgumentException()
+	{
+		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+				() => _coordinator.ClaimDueJobAsync( Worker, 0, null ) );
+
+		Assert.Equal( "worker", exception.ParamName );
+
+		exception = await Assert.ThrowsAsync<ArgumentException>(
+				() => _coordinator.RenewClaimAsync( "some-run", $"{Worker}/2", 1 ) );
+
+		Assert.Equal( "claimant", exception.ParamName );
 	}
 
 	[Fact]
@@ -102,9 +124,9 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	{
 		string identifier = await RegisterDueScheduleAsync( "Renewal contested" );
 
-		ClaimedJob job = Assert.Single(
-				await _coordinator.ClaimDueJobsAsync( Worker, 10 ),
-				claimed => claimed.Context.Schedule == identifier );
+		ClaimedJob? job = await _coordinator.ClaimDueJobAsync( Worker, _worker, null );
+
+		Assert.Equal( identifier, job?.Context.Schedule );
 
 		_fixture.Authorizations.Grant(
 				OtherWorker, CoordinatorSecurityOperations.RenewClaim, SecurityObjectTypes.ExecutionCoordinator,
@@ -112,7 +134,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 
 		IExecutionCoordinator other = new ExecutionCoordinatorClient( _fixture.CreateApiClient( OtherWorker ) );
 
-		Assert.False( await other.RenewClaimAsync( job.Context.Run, OtherWorker ) );
+		Assert.False( await other.RenewClaimAsync( job!.Context.Run, OtherWorker, _worker ) );
 	}
 
 	[Fact]
@@ -120,7 +142,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 	{
 		UnknownRunException exception = await Assert.ThrowsAsync<UnknownRunException>(
 				() => _coordinator.ReportCompletionAsync(
-						"no-such-run", Worker, RunResults.Failed, new JobOutcome { Successful = false } ) );
+						"no-such-run", Worker, _worker, RunResults.Failed, new JobOutcome { Successful = false } ) );
 
 		Assert.Equal( "no-such-run", exception.Identifier );
 	}
@@ -131,7 +153,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 		IExecutionCoordinator impersonating =
 			new ExecutionCoordinatorClient( _fixture.CreateApiClient( Worker ) );
 
-		await Assert.ThrowsAsync<NotAuthorized>( () => impersonating.ClaimDueJobsAsync( OtherWorker, 10 ) );
+		await Assert.ThrowsAsync<NotAuthorized>( () => impersonating.ClaimDueJobAsync( OtherWorker, 1, null ) );
 	}
 
 	[Fact]

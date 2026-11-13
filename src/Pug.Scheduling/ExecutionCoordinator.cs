@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Pug.Application.Data;
 using Pug.Application.Data.Extensions;
 using Pug.Application.Security;
@@ -17,6 +18,11 @@ namespace Pug.Scheduling
 	// corresponding CoordinatorSecurityOperations grant on the claimant identity being acted as,
 	// which is what keeps one worker from claiming, renewing, or completing runs as another;
 	// calls with no principal at all are in-process by construction and are trusted.
+	//
+	// Leases are held per worker, as "claimant/worker": grants belong to the group (claimant),
+	// exclusivity to the individual worker. A worker restarted under the same claimant and
+	// number presents the same holder, so the lease store lets it re-take its predecessor's live
+	// lease, and PrepareJobAsync adopts the unfinished run rather than duplicating it.
 	public class ExecutionCoordinator : IExecutionCoordinator
 	{
 		private readonly IdentifierGenerator _identifierGenerator;
@@ -24,12 +30,14 @@ namespace Pug.Scheduling
 		private readonly IExecutionLeaseProvider _leaseProvider;
 		private readonly ISecurityManager _securityManager;
 		private readonly ExecutionCoordinatorOptions _options;
+		private readonly ILogger<ExecutionCoordinator> _logger;
 
 		public ExecutionCoordinator( IdentifierGenerator identifierGenerator,
 									IApplicationData<IDataSession> applicationDataProvider,
 									IExecutionLeaseProvider leaseProvider,
 									ISecurityManager securityManager,
-									ExecutionCoordinatorOptions options )
+									ExecutionCoordinatorOptions options,
+									ILogger<ExecutionCoordinator> logger )
 		{
 			_identifierGenerator = identifierGenerator ??
 									throw new ArgumentNullException( nameof(identifierGenerator) );
@@ -42,12 +50,28 @@ namespace Pug.Scheduling
 			_securityManager = securityManager ?? throw new ArgumentNullException( nameof(securityManager) );
 
 			_options = options ?? throw new ArgumentNullException( nameof(options) );
+
+			if( _options.ClaimCandidates < 1 )
+				throw new ArgumentException( "At least one claim candidate is required.", nameof(options) );
+
+			_logger = logger ?? throw new ArgumentNullException( nameof(logger) );
 		}
 
-		private static void ValidateClaimant( string claimant )
+		// claimant is the worker group's identity, qualifying its grants; the lease holder is the
+		// individual worker within it, composed as "claimant/worker". The separator is reserved
+		// so no two (claimant, worker) pairs compose to the same holder.
+		private static string ValidateCaller( string claimant, int worker )
 		{
 			if( string.IsNullOrWhiteSpace( claimant ) )
 				throw new ArgumentException( "Value cannot be null or whitespace.", nameof(claimant) );
+
+			if( claimant.Contains( '/' ) )
+				throw new ArgumentException( "Claimant must not contain '/'.", nameof(claimant) );
+
+			if( worker < 1 )
+				throw new ArgumentException( "Worker number must be 1 or greater.", nameof(worker) );
+
+			return $"{claimant}/{worker}";
 		}
 
 		// Grants are qualified by the claimant identity being acted as; there is no owner rule
@@ -57,7 +81,7 @@ namespace Pug.Scheduling
 		// endpoint in front of the coordinator requires an authenticated caller before dispatch,
 		// so a call that crossed a transport always arrives with a principal and is always
 		// checked. A worker hosted in-process therefore needs no service identity of its own.
-		private async Task CheckAuthorizationAsync( string operation, string claimant )
+		private async Task CheckAuthorizationAsync( string operation, string claimant, int worker )
 		{
 			if( _securityManager.CurrentPrincipal is null )
 				return;
@@ -71,66 +95,89 @@ namespace Pug.Scheduling
 														)
 													.ConfigureAwait( false );
 
-			if( !isAuthorized )
-				throw new NotAuthorized();
+			if( isAuthorized )
+				return;
+
+			_logger.LogWarning(
+					"Authorization denied: {Operation} as claimant {Claimant} (worker {Worker}).",
+					operation, claimant, worker );
+
+			throw new NotAuthorized();
 		}
 
-		public async Task<IEnumerable<ClaimedJob>> ClaimDueJobsAsync( string claimant, int maximumJobs )
+		public async Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string jobType )
 		{
-			ValidateClaimant( claimant );
+			string holder = ValidateCaller( claimant, worker );
 
-			if( maximumJobs < 1 )
-				throw new ArgumentException( "At least one job must be claimable.", nameof(maximumJobs) );
+			if( jobType is not null && string.IsNullOrWhiteSpace( jobType ) )
+				throw new ArgumentException( "Value cannot be whitespace; pass null for any job type.", nameof(jobType) );
 
-			await CheckAuthorizationAsync( CoordinatorSecurityOperations.ClaimJobs, claimant )
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.ClaimJobs, claimant, worker )
 				.ConfigureAwait( false );
 
+			// A small window rather than the single oldest due schedule: losing the race for one
+			// candidate to a peer moves on to the next, instead of returning nothing while other
+			// work is due.
 			IEnumerable<ScheduleInfo> candidates =
 				await _applicationDataProvider.ExecuteAsync(
 							async ( session, context ) =>
-								await session.GetDueSchedulesAsync( context.dueBy, context.maximumJobs )
+								await session.GetDueSchedulesAsync(
+												context.dueBy, context.jobType, context.maximumSchedules )
 											.ConfigureAwait( false ),
-							context: new { dueBy = DateTime.UtcNow, maximumJobs }
+							context: new { dueBy = DateTime.UtcNow, jobType, maximumSchedules = _options.ClaimCandidates }
 						).ConfigureAwait( false );
-
-			List<ClaimedJob> claimed = new();
 
 			foreach( ScheduleInfo schedule in candidates )
 			{
-				if( claimed.Count >= maximumJobs )
-					break;
-
 				DateTime leaseExpiry = DateTime.UtcNow + _options.LeaseDuration;
 
-				// Losing the race simply means a peer coordinator claimed this schedule.
-				if( !await _leaseProvider.TryAcquireAsync( schedule.Identifier, claimant, leaseExpiry )
+				// Losing the race simply means a peer claimed this schedule.
+				if( !await _leaseProvider.TryAcquireAsync( schedule.Identifier, holder, leaseExpiry )
 										.ConfigureAwait( false ) )
+				{
+					_logger.LogDebug(
+							"Claimant {Claimant} worker {Worker} lost the lease race for schedule {Schedule} to a peer.",
+							claimant, worker, schedule.Identifier );
+
 					continue;
+				}
 
 				ClaimedJob job;
 
 				try
 				{
-					job = await PrepareJobAsync( schedule, claimant, leaseExpiry ).ConfigureAwait( false );
+					job = await PrepareJobAsync( schedule, claimant, worker, holder, leaseExpiry )
+							.ConfigureAwait( false );
 				}
-				catch
+				catch( Exception exception )
 				{
-					await _leaseProvider.ReleaseAsync( schedule.Identifier, claimant ).ConfigureAwait( false );
+					_logger.LogError(
+							exception,
+							"Claimant {Claimant} worker {Worker} failed to prepare a job for schedule {Schedule}; " +
+							"releasing its lease.",
+							claimant, worker, schedule.Identifier );
+
+					await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
 
 					throw;
 				}
 
 				if( job is not null )
-					claimed.Add( job );
+					return job;
 			}
 
-			return claimed;
+			_logger.LogDebug(
+					"No due work for claimant {Claimant} worker {Worker} (job type {JobType}).",
+					claimant, worker, jobType ?? "any" );
+
+			return null;
 		}
 
 		// Turns a claimed schedule into an executable job: resolves the occurrence being fired,
 		// classifies the trigger, applies the misfire policy, and records the run. Returns null
 		// when the occurrence is disposed of without execution (misfire SKIP or a stale read).
-		private async Task<ClaimedJob> PrepareJobAsync( ScheduleInfo schedule, string claimant, DateTime leaseExpiry )
+		private async Task<ClaimedJob> PrepareJobAsync( ScheduleInfo schedule, string claimant, int worker, string holder,
+														DateTime leaseExpiry )
 		{
 			ScheduleDefinition definition = schedule.Definition;
 			ScheduleState state = schedule.State;
@@ -141,7 +188,11 @@ namespace Pug.Scheduling
 			// read; nothing to execute.
 			if( state.NextRun is null || state.NextRun > now )
 			{
-				await _leaseProvider.ReleaseAsync( schedule.Identifier, claimant ).ConfigureAwait( false );
+				_logger.LogWarning(
+						"Discarded stale due candidate {Schedule}: it was advanced since the due read.",
+						schedule.Identifier );
+
+				await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
 
 				return null;
 			}
@@ -181,7 +232,7 @@ namespace Pug.Scheduling
 
 				if( misfired && definition.MisfirePolicy.Handling == MisfireHandlings.Skip )
 				{
-					await SkipOccurrenceAsync( schedule, claimant, due, now ).ConfigureAwait( false );
+					await SkipOccurrenceAsync( schedule, holder, due, now ).ConfigureAwait( false );
 
 					return null;
 				}
@@ -197,6 +248,11 @@ namespace Pug.Scheduling
 				latestRun.ScheduledFor == scheduledFor && latestRun.Attempt == state.Attempt )
 			{
 				runIdentifier = latestRun.Identifier;
+
+				_logger.LogInformation(
+						"Claimant {Claimant} worker {Worker} adopted unfinished run {Run} of schedule {Schedule} " +
+						"(occurrence {ScheduledFor}, attempt {Attempt}).",
+						claimant, worker, runIdentifier, schedule.Identifier, scheduledFor, state.Attempt );
 
 				if( state.RunRequested )
 					await _applicationDataProvider.PerformAsync(
@@ -240,6 +296,11 @@ namespace Pug.Scheduling
 						).ConfigureAwait( false );
 			}
 
+			_logger.LogInformation(
+					"Claimant {Claimant} worker {Worker} claimed run {Run} of schedule {Schedule} " +
+					"(occurrence {ScheduledFor}, attempt {Attempt}, trigger {Trigger}).",
+					claimant, worker, runIdentifier, schedule.Identifier, scheduledFor, state.Attempt, trigger );
+
 			return new ClaimedJob
 			{
 				Context = new ScheduledJobContext
@@ -261,9 +322,13 @@ namespace Pug.Scheduling
 
 		// Misfire SKIP: dispose of the missed occurrence without execution — record a SKIPPED
 		// run for the audit trail, advance to the next future occurrence, release the claim.
-		private async Task SkipOccurrenceAsync( ScheduleInfo schedule, string claimant, DateTime due, DateTime now )
+		private async Task SkipOccurrenceAsync( ScheduleInfo schedule, string holder, DateTime due, DateTime now )
 		{
 			DateTime? nextRun = RecurrenceCalculator.GetNextOccurrence( schedule.Definition.Recurrence, now );
+
+			_logger.LogInformation(
+					"Skipped occurrence {ScheduledFor} of schedule {Schedule} per its misfire policy; next run {NextRun}.",
+					due, schedule.Identifier, nextRun );
 
 			ScheduleRun run = new()
 			{
@@ -293,17 +358,17 @@ namespace Pug.Scheduling
 						context: new { run, schedule = schedule.Identifier, nextRun, lastRun }
 					).ConfigureAwait( false );
 
-			await _leaseProvider.ReleaseAsync( schedule.Identifier, claimant ).ConfigureAwait( false );
+			await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
 		}
 
-		public async Task<bool> RenewClaimAsync( string run, string claimant )
+		public async Task<bool> RenewClaimAsync( string run, string claimant, int worker )
 		{
-			ValidateClaimant( claimant );
+			string holder = ValidateCaller( claimant, worker );
 
 			if( string.IsNullOrWhiteSpace( run ) )
 				throw new ArgumentException( "Value cannot be null or whitespace.", nameof(run) );
 
-			await CheckAuthorizationAsync( CoordinatorSecurityOperations.RenewClaim, claimant )
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.RenewClaim, claimant, worker )
 				.ConfigureAwait( false );
 
 			ScheduleRun runRecord =
@@ -314,16 +379,30 @@ namespace Pug.Scheduling
 						).ConfigureAwait( false );
 
 			if( runRecord is null )
-				return false;
+			{
+				_logger.LogWarning(
+						"Refused renewal of unknown run {Run} for claimant {Claimant} worker {Worker}.",
+						run, claimant, worker );
 
-			return await _leaseProvider.RenewAsync(
-							runRecord.Schedule, claimant, DateTime.UtcNow + _options.LeaseDuration )
-						.ConfigureAwait( false );
+				return false;
+			}
+
+			bool renewed = await _leaseProvider.RenewAsync(
+									runRecord.Schedule, holder, DateTime.UtcNow + _options.LeaseDuration )
+								.ConfigureAwait( false );
+
+			if( !renewed )
+				_logger.LogWarning(
+						"Refused renewal of run {Run} of schedule {Schedule}: claimant {Claimant} worker {Worker} " +
+						"no longer holds the claim.",
+						run, runRecord.Schedule, claimant, worker );
+
+			return renewed;
 		}
 
-		public async Task ReportCompletionAsync( string run, string claimant, string result, JobOutcome outcome )
+		public async Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
 		{
-			ValidateClaimant( claimant );
+			string holder = ValidateCaller( claimant, worker );
 
 			if( string.IsNullOrWhiteSpace( run ) )
 				throw new ArgumentException( "Value cannot be null or whitespace.", nameof(run) );
@@ -332,7 +411,7 @@ namespace Pug.Scheduling
 			if( result != RunResults.Succeeded && result != RunResults.Failed && result != RunResults.TimedOut )
 				throw new ArgumentException( $"Unknown or non-reportable run result '{result}'.", nameof(result) );
 
-			await CheckAuthorizationAsync( CoordinatorSecurityOperations.ReportCompletion, claimant )
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.ReportCompletion, claimant, worker )
 				.ConfigureAwait( false );
 
 			ScheduleRun runRecord =
@@ -354,6 +433,17 @@ namespace Pug.Scheduling
 
 			if( schedule is null )
 				throw new UnknownScheduleException( runRecord.Schedule );
+
+			// Diagnostic only: a completion from a worker whose claim lapsed is still recorded, as
+			// it always has been — the run did execute — but a peer may be re-executing the
+			// occurrence, which an operator needs to be able to see.
+			ExecutionLease lease = await _leaseProvider.GetAsync( schedule.Identifier ).ConfigureAwait( false );
+
+			if( lease is null || lease.ClaimedBy != holder )
+				_logger.LogWarning(
+						"Completion of run {Run} of schedule {Schedule} reported by claimant {Claimant} worker {Worker}, " +
+						"which no longer holds the claim (held by {Holder}).",
+						run, schedule.Identifier, claimant, worker, lease?.ClaimedBy ?? "nobody" );
 
 			DateTime now = DateTime.UtcNow;
 
@@ -391,6 +481,10 @@ namespace Pug.Scheduling
 				}
 			}
 
+			_logger.LogDebug(
+					"Next occurrence of schedule {Schedule} computed: {NextRun} (attempt {Attempt}).",
+					schedule.Identifier, nextRun, attempt );
+
 			RunSummary lastRun = new() { Started = runRecord.Started, Finished = now, Result = result };
 
 			await _applicationDataProvider.PerformAsync(
@@ -409,7 +503,17 @@ namespace Pug.Scheduling
 						context: new { run, now, result, outcome, schedule = schedule.Identifier, attempt, nextRun, lastRun }
 					).ConfigureAwait( false );
 
-			await _leaseProvider.ReleaseAsync( schedule.Identifier, claimant ).ConfigureAwait( false );
+			await _leaseProvider.ReleaseAsync( schedule.Identifier, holder ).ConfigureAwait( false );
+
+			_logger.LogInformation(
+					"Recorded completion of run {Run} of schedule {Schedule} by claimant {Claimant} worker {Worker}: " +
+					"{Result}.",
+					run, schedule.Identifier, claimant, worker, result );
+
+			if( attempt > 0 )
+				_logger.LogInformation(
+						"Scheduled retry {Attempt} of schedule {Schedule} (occurrence {ScheduledFor}) for {NextRun}.",
+						attempt, schedule.Identifier, runRecord.ScheduledFor, nextRun );
 		}
 	}
 }
