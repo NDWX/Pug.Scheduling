@@ -58,7 +58,7 @@ namespace Pug.Scheduling.Data.Postgres
 
 		private const string RunColumns =
 			@"identifier, schedule, domain, scheduledFor, started, finished, attempt,
-				runTrigger as Trigger, result, outcome";
+				runTrigger as Trigger, result, outcome, claimedBy";
 
 		private static ScheduleInfo Compose( ScheduleRow row ) =>
 			new()
@@ -257,15 +257,26 @@ namespace Pug.Scheduling.Data.Postgres
 				);
 		}
 
-		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, int maximumSchedules )
+		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules )
 		{
+			// Two statements rather than '@jobType is null or jobType = @jobType': a null
+			// parameter carries no type, which Npgsql rejects, and the unfiltered read keeps the
+			// plain due-index plan.
+			string sql = jobType is null
+							? $@"select {ScheduleColumns} from schedule
+									where enabled and not paused
+										and nextRun is not null and nextRun <= @dueBy
+									order by nextRun
+									limit @maximumSchedules;"
+							: $@"select {ScheduleColumns} from schedule
+									where enabled and not paused
+										and jobType = @jobType
+										and nextRun is not null and nextRun <= @dueBy
+									order by nextRun
+									limit @maximumSchedules;";
+
 			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
-													$@"select {ScheduleColumns} from schedule
-														where enabled and not paused
-															and nextRun is not null and nextRun <= @dueBy
-														order by nextRun
-														limit @maximumSchedules;",
-													new { dueBy, maximumSchedules }
+													sql, new { dueBy, jobType, maximumSchedules }
 												).ConfigureAwait( false );
 
 			return rows.Select( Compose ).ToList();
@@ -275,9 +286,9 @@ namespace Pug.Scheduling.Data.Postgres
 		{
 			return Connection.ExecuteAsync(
 					@"insert into scheduleRun(identifier, schedule, domain, scheduledFor, started, finished,
-							attempt, runTrigger, result, outcome)
+							attempt, runTrigger, result, outcome, claimedBy)
 						values(@identifier, @schedule, @domain, @scheduledFor, @started, @finished,
-							@attempt, @trigger, @result, @outcome);",
+							@attempt, @trigger, @result, @outcome, @claimedBy);",
 					new
 					{
 						identifier = run.Identifier,
@@ -289,7 +300,8 @@ namespace Pug.Scheduling.Data.Postgres
 						attempt = run.Attempt,
 						trigger = run.Trigger,
 						result = run.Result,
-						outcome = run.Outcome
+						outcome = run.Outcome,
+						claimedBy = run.ClaimedBy
 					}
 				);
 		}
@@ -311,13 +323,25 @@ namespace Pug.Scheduling.Data.Postgres
 				);
 		}
 
-		public Task CompleteRunAsync( string run, DateTime finished, string result, JobOutcome? outcome )
+		public Task ClaimRunAsync( string run, string claimedBy )
 		{
 			return Connection.ExecuteAsync(
-					@"update scheduleRun set finished = @finished, result = @result, outcome = @outcome
-						where identifier = @run;",
-					new { run, finished, result, outcome }
+					"update scheduleRun set claimedBy = @claimedBy where identifier = @run;",
+					new { run, claimedBy }
 				);
+		}
+
+		public async Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result,
+												JobOutcome? outcome )
+		{
+			int updated = await Connection.ExecuteAsync(
+									@"update scheduleRun set finished = @finished, result = @result, outcome = @outcome
+										where identifier = @run and finished is null
+											and (claimedBy = @claimedBy or claimedBy is null);",
+									new { run, claimedBy, finished, result, outcome }
+								).ConfigureAwait( false );
+
+			return updated > 0;
 		}
 
 		public Task RecordOccurrenceCompletionAsync( string schedule, int attempt, DateTime? nextRun,

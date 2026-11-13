@@ -11,11 +11,12 @@ namespace Pug.Scheduling.Worker.WebApi;
 public static class SchedulerWorkerEndpoints
 {
 	/// <summary>
-	/// Maps management endpoints for the worker instance hosted in this process, under their own
-	/// <c>worker/</c> prefix, onto the given route builder. They live in their own package
-	/// because a worker may be hosted out-of-process, where the host reaches the scheduler solely
-	/// through the execution coordinator's transport and has no reason to reference the
-	/// scheduler's own WebApi.
+	/// Maps management endpoints for the workers hosted in this process, under their own
+	/// <c>workers/</c> prefix, onto the given route builder; individual workers are addressed by
+	/// their host-wide worker number through <see cref="ISchedulerWorkerRegistry"/>. They live in
+	/// their own package because a worker may be hosted out-of-process, where the host reaches the
+	/// scheduler solely through the execution coordinator's transport and has no reason to
+	/// reference the scheduler's own WebApi.
 	/// Unlike the schedule endpoints, these enforce authorization themselves:
 	/// <see cref="ISchedulerWorker"/> performs none, so every caller requires an explicit
 	/// <see cref="WorkerSecurityOperations"/> grant on
@@ -24,17 +25,27 @@ public static class SchedulerWorkerEndpoints
 	/// </summary>
 	public static IEndpointRouteBuilder MapSchedulerWorkerEndpoints( this IEndpointRouteBuilder routes )
 	{
-		routes.MapGet( "worker", GetWorkerInfo )
+		routes.MapGet( "workers", GetWorkers )
+			.RequireAuthorization()
+			.WithName( "GetSchedulerWorkers" )
+#if NET7_0_OR_GREATER
+			.WithTags( "SchedulerWorker" )
+			.WithSummary( "Get runtime status of the workers hosted in this process that the caller may view" )
+#endif
+			.Produces<WorkerInfo[]>( StatusCodes.Status200OK );
+
+		routes.MapGet( "workers/{worker:int}", GetWorkerInfo )
 			.RequireAuthorization()
 			.WithName( "GetSchedulerWorkerInfo" )
 #if NET7_0_OR_GREATER
 			.WithTags( "SchedulerWorker" )
-			.WithSummary( "Get runtime status of the worker hosted in this process" )
+			.WithSummary( "Get runtime status of a worker hosted in this process" )
 #endif
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
-			.Produces( StatusCodes.Status403Forbidden );
+			.Produces( StatusCodes.Status403Forbidden )
+			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "worker/pause", PauseWorker )
+		routes.MapPost( "workers/{worker:int}/pause", PauseWorker )
 			.RequireAuthorization()
 			.WithName( "PauseSchedulerWorker" )
 #if NET7_0_OR_GREATER
@@ -42,9 +53,10 @@ public static class SchedulerWorkerEndpoints
 			.WithSummary( "Stop the worker claiming further jobs" )
 #endif
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
-			.Produces( StatusCodes.Status403Forbidden );
+			.Produces( StatusCodes.Status403Forbidden )
+			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "worker/resume", ResumeWorker )
+		routes.MapPost( "workers/{worker:int}/resume", ResumeWorker )
 			.RequireAuthorization()
 			.WithName( "ResumeSchedulerWorker" )
 #if NET7_0_OR_GREATER
@@ -52,7 +64,8 @@ public static class SchedulerWorkerEndpoints
 			.WithSummary( "Resume job claiming by the worker" )
 #endif
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
-			.Produces( StatusCodes.Status403Forbidden );
+			.Produces( StatusCodes.Status403Forbidden )
+			.Produces( StatusCodes.Status404NotFound );
 
 		return routes;
 	}
@@ -74,13 +87,49 @@ public static class SchedulerWorkerEndpoints
 								)
 							.ConfigureAwait( false );
 
-	private static async Task<IResult> GetWorkerInfo(
-		[FromServices] ISchedulerWorker worker,
+	// Lists only the workers whose claimant the caller may view; an empty list rather than 403
+	// when there are none, since the caller may be entitled to workers another host runs.
+	private static async Task<IResult> GetWorkers(
+		[FromServices] ISchedulerWorkerRegistry registry,
 		[FromServices] ISecurityManager securityManager )
 	{
+		List<WorkerInfo> visible = new();
+
+		// Grants are per claimant, and a group's workers share one, so each is checked once.
+		Dictionary<string, bool> authorized = new();
+
+		foreach( ISchedulerWorker worker in registry.Workers )
+		{
+			WorkerInfo info = worker.GetInfo();
+
+			if( !authorized.TryGetValue( info.Claimant, out bool granted ) )
+			{
+				granted = await IsAuthorizedAsync( securityManager, WorkerSecurityOperations.GetInfo, info.Claimant )
+							.ConfigureAwait( false );
+
+				authorized[info.Claimant] = granted;
+			}
+
+			if( granted )
+				visible.Add( info );
+		}
+
+		return Results.Ok( visible.ToArray() );
+	}
+
+	private static async Task<IResult> GetWorkerInfo(
+		int worker,
+		[FromServices] ISchedulerWorkerRegistry registry,
+		[FromServices] ISecurityManager securityManager )
+	{
+		ISchedulerWorker? instance = registry.Find( worker );
+
+		if( instance is null )
+			return Results.NotFound();
+
 		// Reading local status is free of side effects, so the snapshot is taken first to supply
 		// the claimant the grant is qualified by.
-		WorkerInfo info = worker.GetInfo();
+		WorkerInfo info = instance.GetInfo();
 
 		if( !await IsAuthorizedAsync( securityManager, WorkerSecurityOperations.GetInfo, info.Claimant )
 				.ConfigureAwait( false ) )
@@ -90,18 +139,23 @@ public static class SchedulerWorkerEndpoints
 	}
 
 	private static Task<IResult> PauseWorker(
-		[FromServices] ISchedulerWorker worker,
+		int worker,
+		[FromServices] ISchedulerWorkerRegistry registry,
 		[FromServices] ISecurityManager securityManager ) =>
-		SetPausedAsync( worker, securityManager, paused: true );
+		SetPausedAsync( registry.Find( worker ), securityManager, paused: true );
 
 	private static Task<IResult> ResumeWorker(
-		[FromServices] ISchedulerWorker worker,
+		int worker,
+		[FromServices] ISchedulerWorkerRegistry registry,
 		[FromServices] ISecurityManager securityManager ) =>
-		SetPausedAsync( worker, securityManager, paused: false );
+		SetPausedAsync( registry.Find( worker ), securityManager, paused: false );
 
-	private static async Task<IResult> SetPausedAsync( ISchedulerWorker worker, ISecurityManager securityManager,
+	private static async Task<IResult> SetPausedAsync( ISchedulerWorker? worker, ISecurityManager securityManager,
 													bool paused )
 	{
+		if( worker is null )
+			return Results.NotFound();
+
 		WorkerInfo info = worker.GetInfo();
 
 		string operation = paused ? WorkerSecurityOperations.Pause : WorkerSecurityOperations.Resume;

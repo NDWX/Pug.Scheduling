@@ -20,7 +20,6 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../Pug.Scheduling/Pug.Scheduling.csproj" />
-		<ProjectReference Include="../Pug.Scheduling.Worker/Pug.Scheduling.Worker.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

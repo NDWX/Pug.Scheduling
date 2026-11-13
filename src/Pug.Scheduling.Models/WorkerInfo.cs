@@ -10,10 +10,35 @@ namespace Pug.Scheduling.Models
 	[DataContract]
 	public record WorkerInfo
 	{
-		// Identity the worker claims jobs under; also the identifier its management ACLs are
-		// qualified by.
+		// Identity the worker claims jobs under (its group's); also the identifier its management
+		// ACLs are qualified by.
 		[Required, DataMember( IsRequired = true )]
 		public string Claimant
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// The worker's number, unique within its host (1 or greater); the coordinator holds its
+		// claims as "Claimant/Worker", and management endpoints address it by this number.
+		[Required, DataMember( IsRequired = true )]
+		public int Worker
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// The only job type the worker claims; null when it claims any type.
+		[DataMember]
+		public string JobType
 		{
 			get;
 #if NET5_0_OR_GREATER

@@ -34,7 +34,7 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Key of the IScheduledJobHandler registered to execute this schedule's job.
+		// Key of the job handler factory registered to execute this schedule's job.
 		[Required, DataMember( IsRequired = true )]
 		public string JobType
 		{

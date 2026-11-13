@@ -46,10 +46,10 @@ namespace Pug.Scheduling.Data.Abstractions
 		// == Execution operations (ExecutionCoordinator) ==
 
 		// Schedules that are enabled, not paused, and due (NextRun elapsed by dueBy), ordered by
-		// NextRun. A plain read with no claim semantics: exclusive execution is arbitrated by
-		// IExecutionLeaseProvider, so concurrent coordinators may read overlapping candidates
-		// and race for the lease.
-		Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, int maximumSchedules );
+		// NextRun, restricted to jobType when it is not null. A plain read with no claim
+		// semantics: exclusive execution is arbitrated by IExecutionLeaseProvider, so concurrent
+		// coordinators may read overlapping candidates and race for the lease.
+		Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules );
 
 		Task InsertRunAsync( ScheduleRun run );
 
@@ -60,9 +60,16 @@ namespace Pug.Scheduling.Data.Abstractions
 		// unfinished run of a lapsed claim instead of inserting a duplicate.
 		Task<ScheduleRun?> GetLatestRunAsync( string schedule );
 
+		// Records the lease holder ("{claimant}/{worker}") a run is executing under: set at
+		// insertion, and transferred when another worker adopts the unfinished run.
+		Task ClaimRunAsync( string run, string claimedBy );
+
 		// Records the run's terminal state (finished timestamp, worker classification, handler
-		// outcome).
-		Task CompleteRunAsync( string run, DateTime finished, string result, JobOutcome? outcome );
+		// outcome), only while the run is unfinished and still claimed by claimedBy. A run recorded
+		// before holders were tracked has no holder and is matched regardless. Returns false when
+		// nothing was updated: the run finished or was adopted after the caller checked it, so the
+		// check and the write cannot be split by a concurrent adoption.
+		Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result, JobOutcome? outcome );
 
 		// Records occurrence progression on the schedule: retry attempt counter, next occurrence,
 		// and last-run summary in one update; clears any pending run request. Callers must hold

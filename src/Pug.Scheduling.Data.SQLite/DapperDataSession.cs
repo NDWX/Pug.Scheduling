@@ -58,7 +58,7 @@ namespace Pug.Scheduling.Data.SQLite
 
 		private const string RunColumns =
 			@"identifier, schedule, domain, scheduledFor, started, finished, attempt,
-				runTrigger as Trigger, result, outcome";
+				runTrigger as Trigger, result, outcome, claimedBy";
 
 		// SQLite stores timestamps as ISO-8601 text without an offset, so the provider hands them
 		// back as DateTimeKind.Unspecified. Every time in this domain is UTC (and the Postgres
@@ -276,15 +276,26 @@ namespace Pug.Scheduling.Data.SQLite
 				);
 		}
 
-		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, int maximumSchedules )
+		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules )
 		{
+			// Two statements rather than '@jobType is null or jobType = @jobType': a null
+			// parameter carries no type, which Npgsql rejects, and the unfiltered read keeps the
+			// plain due-index plan.
+			string sql = jobType is null
+							? $@"select {ScheduleColumns} from schedule
+									where enabled = 1 and paused = 0
+										and nextRun is not null and nextRun <= @dueBy
+									order by nextRun
+									limit @maximumSchedules;"
+							: $@"select {ScheduleColumns} from schedule
+									where enabled = 1 and paused = 0
+										and jobType = @jobType
+										and nextRun is not null and nextRun <= @dueBy
+									order by nextRun
+									limit @maximumSchedules;";
+
 			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
-													$@"select {ScheduleColumns} from schedule
-														where enabled = 1 and paused = 0
-															and nextRun is not null and nextRun <= @dueBy
-														order by nextRun
-														limit @maximumSchedules;",
-													new { dueBy, maximumSchedules }
+													sql, new { dueBy, jobType, maximumSchedules }
 												).ConfigureAwait( false );
 
 			return rows.Select( Compose ).ToList();
@@ -294,9 +305,9 @@ namespace Pug.Scheduling.Data.SQLite
 		{
 			return Connection.ExecuteAsync(
 					@"insert into scheduleRun(identifier, schedule, domain, scheduledFor, started, finished,
-							attempt, runTrigger, result, outcome)
+							attempt, runTrigger, result, outcome, claimedBy)
 						values(@identifier, @schedule, @domain, @scheduledFor, @started, @finished,
-							@attempt, @trigger, @result, @outcome);",
+							@attempt, @trigger, @result, @outcome, @claimedBy);",
 					new
 					{
 						identifier = run.Identifier,
@@ -308,7 +319,8 @@ namespace Pug.Scheduling.Data.SQLite
 						attempt = run.Attempt,
 						trigger = run.Trigger,
 						result = run.Result,
-						outcome = run.Outcome
+						outcome = run.Outcome,
+						claimedBy = run.ClaimedBy
 					}
 				);
 		}
@@ -336,13 +348,25 @@ namespace Pug.Scheduling.Data.SQLite
 				);
 		}
 
-		public Task CompleteRunAsync( string run, DateTime finished, string result, JobOutcome? outcome )
+		public Task ClaimRunAsync( string run, string claimedBy )
 		{
 			return Connection.ExecuteAsync(
-					@"update scheduleRun set finished = @finished, result = @result, outcome = @outcome
-						where identifier = @run;",
-					new { run, finished, result, outcome }
+					"update scheduleRun set claimedBy = @claimedBy where identifier = @run;",
+					new { run, claimedBy }
 				);
+		}
+
+		public async Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result,
+												JobOutcome? outcome )
+		{
+			int updated = await Connection.ExecuteAsync(
+									@"update scheduleRun set finished = @finished, result = @result, outcome = @outcome
+										where identifier = @run and finished is null
+											and (claimedBy = @claimedBy or claimedBy is null);",
+									new { run, claimedBy, finished, result, outcome }
+								).ConfigureAwait( false );
+
+			return updated > 0;
 		}
 
 		public Task RecordOccurrenceCompletionAsync( string schedule, int attempt, DateTime? nextRun,

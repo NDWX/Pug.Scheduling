@@ -78,6 +78,23 @@ namespace Pug.Scheduling.Data.Postgres
 									@"drop table scheduleRun;"
 								)
 						}
+					),
+				new SchemaVersion(
+						2, new[]
+						{
+							// Serves claims restricted to one job type: the due index alone would
+							// scan every due schedule of other types to find them.
+							new UpgradeScript(
+									"Schedule table job-type due index", Empty,
+									@"create index ixScheduleJobTypeDue on schedule(jobType, nextRun) where enabled and not paused;",
+									@"drop index ixScheduleJobTypeDue;"
+								),
+							new UpgradeScript(
+									"Schedule table job-type due index — run claimant", Empty,
+									@"alter table scheduleRun add column claimedBy character varying;",
+									@"alter table scheduleRun drop column claimedBy;"
+								)
+						}
 					)
 			};
 		}

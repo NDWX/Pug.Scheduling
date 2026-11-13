@@ -3,13 +3,14 @@ using System.Runtime.Serialization;
 
 namespace Pug.Scheduling.WebApi.Models
 {
-	// Request body of IExecutionCoordinator.ClaimDueJobsAsync when the coordinator is reached over
+	// Request body of IExecutionCoordinator.ClaimDueJobAsync when the coordinator is reached over
 	// the wire by an externally hosted worker: an HTTP surface contract, not a domain model —
 	// nothing but the transport uses it.
 	[DataContract]
 	public record JobRunClaimRequest
 	{
-		// Identity the claiming worker instance holds its leases under.
+		// Identity of the worker group the claim is made as; grants are qualified by it. Must not
+		// contain '/'.
 		[Required, DataMember( IsRequired = true )]
 		public string Claimant
 		{
@@ -21,9 +22,22 @@ namespace Pug.Scheduling.WebApi.Models
 #endif
 		}
 
-		// Upper bound on the number of due occurrences to claim in this poll.
+		// Number of the claiming worker within its group (1 or greater); the claim's lease is
+		// held as "Claimant/Worker".
 		[Required, DataMember( IsRequired = true )]
-		public int MaximumJobs
+		public int Worker
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// Restricts the claim to this job type; null claims any type.
+		[DataMember]
+		public string JobType
 		{
 			get;
 #if NET5_0_OR_GREATER

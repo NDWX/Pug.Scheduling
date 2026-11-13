@@ -6,7 +6,7 @@ using Pug.Effable;
 namespace Pug.Scheduling.Models
 {
 	// Everything a job handler needs to execute one occurrence of a schedule. Serializable so
-	// non-in-process dispatchers (e.g. a future webhook dispatcher) can carry it across the wire
+	// handler factories that run the job elsewhere (e.g. one calling a webhook) can carry it across the wire
 	// without contract changes.
 	[DataContract]
 	public record ScheduledJobContext

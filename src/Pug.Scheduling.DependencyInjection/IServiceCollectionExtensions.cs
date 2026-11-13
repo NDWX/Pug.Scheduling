@@ -5,7 +5,6 @@ using Pug.Application.Data;
 using Pug.Application.Security;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
-using Pug.Scheduling.Worker;
 
 namespace Pug.Scheduling.DependencyInjection
 {
@@ -17,7 +16,8 @@ namespace Pug.Scheduling.DependencyInjection
 		/// already registered <see cref="IApplicationData{IDataSession}"/> for the schedule store
 		/// (a concrete provider such as the Postgres or SQLite <c>DapperData</c>),
 		/// <see cref="IExecutionLeaseProvider"/> (e.g. <c>DatabaseExecutionLeaseProvider</c> over
-		/// its own lease store), and <see cref="ISecurityManager"/>.
+		/// its own lease store), <see cref="ISecurityManager"/>, and logging
+		/// (<see cref="ILogger{TCategoryName}"/>, e.g. via <c>AddLogging()</c>).
 		/// </summary>
 		public static IServiceCollection AddScheduling( this IServiceCollection serviceCollection,
 														IdentifierGenerator identifierGenerator,
@@ -49,54 +49,10 @@ namespace Pug.Scheduling.DependencyInjection
 							provider.GetRequiredService<IApplicationData<IDataSession>>(),
 							provider.GetRequiredService<IExecutionLeaseProvider>(),
 							provider.GetRequiredService<ISecurityManager>(),
-							coordinatorOptions ?? new ExecutionCoordinatorOptions()
+							coordinatorOptions ?? new ExecutionCoordinatorOptions(),
+							provider.GetRequiredService<ILogger<ExecutionCoordinator>>()
 						)
 				);
-
-			return serviceCollection;
-		}
-
-		/// <summary>
-		/// Registers the <see cref="SchedulerWorker"/> hosted service (and its management surface
-		/// <see cref="ISchedulerWorker"/>). Registers <see cref="InProcessJobDispatcher"/> as the
-		/// default <see cref="IScheduledJobDispatcher"/> unless the host registered another
-		/// transport first.
-		/// </summary>
-		public static IServiceCollection AddSchedulingWorker( this IServiceCollection serviceCollection,
-															WorkerOptions options = null )
-		{
-			serviceCollection.TryAddSingleton<IScheduledJobDispatcher, InProcessJobDispatcher>();
-
-			serviceCollection.AddSingleton(
-					provider => new SchedulerWorker(
-							provider.GetRequiredService<IExecutionCoordinator>(),
-							provider.GetRequiredService<IScheduledJobDispatcher>(),
-							options ?? new WorkerOptions(),
-							provider.GetRequiredService<ILogger<SchedulerWorker>>()
-						)
-				);
-
-			serviceCollection.AddSingleton<ISchedulerWorker>(
-					provider => provider.GetRequiredService<SchedulerWorker>() );
-
-			serviceCollection.AddHostedService( provider => provider.GetRequiredService<SchedulerWorker>() );
-
-			return serviceCollection;
-		}
-
-		/// <summary>
-		/// Registers a job handler for the job type (keyed, scoped — resolved per run by the
-		/// in-process dispatcher) and declares the job type schedulable.
-		/// </summary>
-		public static IServiceCollection AddScheduledJobHandler<THandler>( this IServiceCollection serviceCollection,
-																			string jobType )
-			where THandler : class, IScheduledJobHandler
-		{
-			ValidateJobType( jobType );
-
-			GetOrAddRegistrations( serviceCollection ).JobTypes.Add( jobType );
-
-			serviceCollection.AddKeyedScoped<IScheduledJobHandler, THandler>( jobType );
 
 			return serviceCollection;
 		}
@@ -119,7 +75,8 @@ namespace Pug.Scheduling.DependencyInjection
 
 		/// <summary>
 		/// Declares a job type schedulable without registering a local handler — for deployments
-		/// where execution happens elsewhere (external workers / remote dispatch).
+		/// where this host only accepts schedules, e.g. because jobs execute in separate worker hosts, or
+		/// to pair with a handler registered through Pug.Scheduling.Worker.DependencyInjection.
 		/// </summary>
 		public static IServiceCollection AddSchedulableJobType( this IServiceCollection serviceCollection,
 																string jobType )
