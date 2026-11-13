@@ -23,7 +23,7 @@ namespace Pug.Scheduling.Tests.Infrastructure;
 /// <summary>
 /// Hosts the scheduling endpoints over a TestServer against real SQLite schedule and lease
 /// stores, wired through the production DI extensions — so endpoint tests exercise the same
-/// composition a host would use, with only the security principal and the worker faked.
+/// composition a host would use, with only the security principal and the workers faked.
 /// </summary>
 public sealed class SchedulingApiFixture : IAsyncLifetime
 {
@@ -37,7 +37,16 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 
 	internal TestAuthorizations Authorizations { get; } = new();
 
-	internal FakeSchedulerWorker Worker { get; } = new();
+	// Claimants of the two hosted fake workers: management grants are per claimant, so each can be
+	// granted without the other.
+	internal const string WorkerClaimant = "test-worker";
+	internal const string OtherWorkerClaimant = "test-worker-2";
+
+	// Worker 1 claims any job type under WorkerClaimant; worker 2 only JobType under
+	// OtherWorkerClaimant.
+	internal FakeSchedulerWorker Worker { get; } = new( WorkerClaimant, 1 );
+
+	internal FakeSchedulerWorker OtherWorker { get; } = new( OtherWorkerClaimant, 2, JobType );
 
 	internal static JsonSerializerOptions JsonOptions { get; } = new( JsonSerializerDefaults.Web );
 
@@ -102,7 +111,7 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 				coordinatorOptions: new ExecutionCoordinatorOptions { ClaimCandidates = 100 } );
 		services.AddSchedulableJobType( JobType );
 
-		services.AddSingleton<ISchedulerWorker>( Worker );
+		services.AddSingleton<ISchedulerWorkerRegistry>( new FakeSchedulerWorkerRegistry( Worker, OtherWorker ) );
 	}
 
 	private static void Configure( IApplicationBuilder app )

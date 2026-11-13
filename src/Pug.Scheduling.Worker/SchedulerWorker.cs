@@ -21,14 +21,14 @@ namespace Pug.Scheduling.Worker
 	/// </summary>
 	public sealed class SchedulerWorker : BackgroundService, ISchedulerWorker
 	{
-		// The worker's number within its claimant group. One worker per claimant until worker
-		// groups arrive; the coordinator holds this worker's claims as "Claimant/1".
-		private const int WorkerNumber = 1;
-
 		private readonly IExecutionCoordinator _coordinator;
 		private readonly IScheduledJobHandlerFactoryRegistry _handlerFactories;
 		private readonly WorkerOptions _options;
+		private readonly int _worker;
 		private readonly ILogger<SchedulerWorker> _logger;
+
+		// The worker's group filter as logged: its job type, or "any".
+		private readonly string _jobTypeFilter;
 
 		private readonly object _stateLock = new();
 		private bool _paused;
@@ -39,20 +39,37 @@ namespace Pug.Scheduling.Worker
 		// immediately (FetchWorker precedent).
 		private TaskCompletionSource _stateChanged = NewSignal();
 
+		/// <param name="coordinator">The worker's only link to the scheduler.</param>
+		/// <param name="handlerFactories">Handler factories by job type.</param>
+		/// <param name="options">The worker's group configuration; see <see cref="WorkerOptions.Validate"/>.</param>
+		/// <param name="number">
+		/// The worker's number, 1 or greater and unique within the host: the coordinator holds this
+		/// worker's claims as "Claimant/number", and a restarted worker presenting the same claimant
+		/// and number re-takes its own claims.
+		/// </param>
+		/// <param name="logger">Logger.</param>
 		public SchedulerWorker( IExecutionCoordinator coordinator,
 								IScheduledJobHandlerFactoryRegistry handlerFactories,
 								WorkerOptions options,
+								int number,
 								ILogger<SchedulerWorker> logger )
 		{
 			_coordinator = coordinator ?? throw new ArgumentNullException( nameof(coordinator) );
 			_handlerFactories = handlerFactories ?? throw new ArgumentNullException( nameof(handlerFactories) );
 			_options = options ?? throw new ArgumentNullException( nameof(options) );
 
-			if( string.IsNullOrWhiteSpace( _options.Claimant ) )
-				throw new ArgumentException( "Worker claimant name is required.", nameof(options) );
+			_options.Validate();
 
+			if( number < 1 )
+				throw new ArgumentOutOfRangeException( nameof(number), number, "Worker number must be 1 or greater." );
+
+			_worker = number;
+			_jobTypeFilter = _options.JobType ?? "any";
 			_logger = logger ?? throw new ArgumentNullException( nameof(logger) );
 		}
+
+		// The worker's host-wide number.
+		public int Number => _worker;
 
 		private static TaskCompletionSource NewSignal() =>
 			new( TaskCreationOptions.RunContinuationsAsynchronously );
@@ -66,6 +83,8 @@ namespace Pug.Scheduling.Worker
 				return new WorkerInfo
 				{
 					Claimant = _options.Claimant,
+					Worker = _worker,
+					JobType = _options.JobType,
 					Paused = _paused,
 					LastPoll = _lastPoll,
 					ActiveJobs = _activeJobs
@@ -77,7 +96,8 @@ namespace Pug.Scheduling.Worker
 			lock( _stateLock )
 				_paused = true;
 
-			_logger.LogInformation( "Worker {Claimant}/{Worker} paused.", _options.Claimant, WorkerNumber );
+			_logger.LogInformation( "Worker {Claimant}/{Worker} (job type {JobType}) paused.",
+									_options.Claimant, _worker, _jobTypeFilter );
 
 			SignalStateChanged();
 		}
@@ -87,7 +107,8 @@ namespace Pug.Scheduling.Worker
 			lock( _stateLock )
 				_paused = false;
 
-			_logger.LogInformation( "Worker {Claimant}/{Worker} resumed.", _options.Claimant, WorkerNumber );
+			_logger.LogInformation( "Worker {Claimant}/{Worker} (job type {JobType}) resumed.",
+									_options.Claimant, _worker, _jobTypeFilter );
 
 			SignalStateChanged();
 		}
@@ -103,7 +124,8 @@ namespace Pug.Scheduling.Worker
 
 		protected override async Task ExecuteAsync( CancellationToken stoppingToken )
 		{
-			_logger.LogInformation( "Worker {Claimant}/{Worker} started.", _options.Claimant, WorkerNumber );
+			_logger.LogInformation( "Worker {Claimant}/{Worker} (job type {JobType}) started.",
+									_options.Claimant, _worker, _jobTypeFilter );
 
 			try
 			{
@@ -111,7 +133,8 @@ namespace Pug.Scheduling.Worker
 			}
 			finally
 			{
-				_logger.LogInformation( "Worker {Claimant}/{Worker} stopping.", _options.Claimant, WorkerNumber );
+				_logger.LogInformation( "Worker {Claimant}/{Worker} (job type {JobType}) stopping.",
+										_options.Claimant, _worker, _jobTypeFilter );
 			}
 		}
 
@@ -135,13 +158,13 @@ namespace Pug.Scheduling.Worker
 
 				try
 				{
-					job = await _coordinator.ClaimDueJobAsync( _options.Claimant, WorkerNumber, null )
+					job = await _coordinator.ClaimDueJobAsync( _options.Claimant, _worker, _options.JobType )
 											.ConfigureAwait( false );
 				}
 				catch( Exception exception )
 				{
-					_logger.LogError( exception, "Worker {Claimant}/{Worker} failed to claim a due job.",
-									_options.Claimant, WorkerNumber );
+					_logger.LogError( exception, "Worker {Claimant}/{Worker} (job type {JobType}) failed to claim a due job.",
+									_options.Claimant, _worker, _jobTypeFilter );
 				}
 
 				lock( _stateLock )
@@ -156,7 +179,8 @@ namespace Pug.Scheduling.Worker
 					continue;
 				}
 
-				_logger.LogDebug( "Worker {Claimant}/{Worker} found no due work.", _options.Claimant, WorkerNumber );
+				_logger.LogDebug( "Worker {Claimant}/{Worker} (job type {JobType}) found no due work.",
+								_options.Claimant, _worker, _jobTypeFilter );
 
 				await WaitForAsync( stateChanged, _options.PollInterval, stoppingToken ).ConfigureAwait( false );
 			}
@@ -193,7 +217,7 @@ namespace Pug.Scheduling.Worker
 
 			_logger.LogInformation(
 					"Worker {Claimant}/{Worker} claimed run {Run} of schedule {Schedule} ({JobType}).",
-					_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule, job.Context.JobType );
+					_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, job.Context.JobType );
 
 			try
 			{
@@ -236,7 +260,7 @@ namespace Pug.Scheduling.Worker
 					if( !outcome.Successful )
 						_logger.LogWarning(
 								"Worker {Claimant}/{Worker} run {Run} of schedule {Schedule} ({JobType}) was unsuccessful: {Error}",
-								_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule,
+								_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
 								job.Context.JobType, outcome.Error );
 				}
 				catch( OperationCanceledException ) when( timeout.IsCancellationRequested )
@@ -245,7 +269,7 @@ namespace Pug.Scheduling.Worker
 
 					_logger.LogWarning(
 							"Worker {Claimant}/{Worker} run {Run} of schedule {Schedule} ({JobType}) timed out after {Duration}.",
-							_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule,
+							_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
 							job.Context.JobType, job.Timeout );
 
 					outcome = new JobOutcome
@@ -261,7 +285,7 @@ namespace Pug.Scheduling.Worker
 					// the occurrence once the lease expires.
 					_logger.LogWarning(
 							"Worker {Claimant}/{Worker} abandoned run {Run} of schedule {Schedule}: {Reason}.",
-							_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule,
+							_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
 							claimLost ? "claim lost" : "host stopping" );
 
 					return;
@@ -275,7 +299,7 @@ namespace Pug.Scheduling.Worker
 
 					_logger.LogWarning( exception,
 										"Worker {Claimant}/{Worker} run {Run} of schedule {Schedule} ({JobType}) threw.",
-										_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule,
+										_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
 										job.Context.JobType );
 				}
 				finally
@@ -290,7 +314,7 @@ namespace Pug.Scheduling.Worker
 					_logger.LogWarning(
 							"Worker {Claimant}/{Worker} completed run {Run} of schedule {Schedule} after losing its claim; " +
 							"outcome not reported.",
-							_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule );
+							_options.Claimant, _worker, job.Context.Run, job.Context.Schedule );
 
 					return;
 				}
@@ -298,20 +322,20 @@ namespace Pug.Scheduling.Worker
 				try
 				{
 					await _coordinator.ReportCompletionAsync(
-										job.Context.Run, _options.Claimant, WorkerNumber, result, outcome )
+										job.Context.Run, _options.Claimant, _worker, result, outcome )
 									.ConfigureAwait( false );
 
 					_logger.LogInformation(
 							"Worker {Claimant}/{Worker} finished run {Run} of schedule {Schedule} ({JobType}) " +
 							"with result {Result} in {Duration}.",
-							_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule,
+							_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
 							job.Context.JobType, result, stopwatch.Elapsed );
 				}
 				catch( Exception exception )
 				{
 					_logger.LogError( exception,
 									"Worker {Claimant}/{Worker} failed to report completion of run {Run} of schedule {Schedule}.",
-									_options.Claimant, WorkerNumber, job.Context.Run, job.Context.Schedule );
+									_options.Claimant, _worker, job.Context.Run, job.Context.Schedule );
 				}
 			}
 			finally
@@ -333,7 +357,7 @@ namespace Pug.Scheduling.Worker
 			{
 				_logger.LogError(
 						"Worker {Claimant}/{Worker} has no handler registered for job type {JobType} (run {Run} of schedule {Schedule}).",
-						_options.Claimant, WorkerNumber, context.JobType, context.Run, context.Schedule );
+						_options.Claimant, _worker, context.JobType, context.Run, context.Schedule );
 
 				return new JobOutcome
 				{
@@ -352,7 +376,7 @@ namespace Pug.Scheduling.Worker
 			{
 				_logger.LogError( exception,
 								"Worker {Claimant}/{Worker} handler factory failed for job type {JobType} (run {Run} of schedule {Schedule}).",
-								_options.Claimant, WorkerNumber, context.JobType, context.Run, context.Schedule );
+								_options.Claimant, _worker, context.JobType, context.Run, context.Schedule );
 
 				return new JobOutcome { Successful = false, Error = exception.ToString() };
 			}
@@ -361,7 +385,7 @@ namespace Pug.Scheduling.Worker
 			{
 				_logger.LogError(
 						"Worker {Claimant}/{Worker} handler factory for job type {JobType} returned no handler (run {Run} of schedule {Schedule}).",
-						_options.Claimant, WorkerNumber, context.JobType, context.Run, context.Schedule );
+						_options.Claimant, _worker, context.JobType, context.Run, context.Schedule );
 
 				return new JobOutcome { Successful = false, Error = "Job handler factory returned no handler." };
 			}
@@ -389,7 +413,7 @@ namespace Pug.Scheduling.Worker
 			{
 				_logger.LogWarning( exception,
 									"Worker {Claimant}/{Worker} failed to dispose the handler of run {Run} of schedule {Schedule} ({JobType}).",
-									_options.Claimant, WorkerNumber, context.Run, context.Schedule, context.JobType );
+									_options.Claimant, _worker, context.Run, context.Schedule, context.JobType );
 			}
 		}
 
@@ -408,21 +432,21 @@ namespace Pug.Scheduling.Worker
 
 					try
 					{
-						renewed = await _coordinator.RenewClaimAsync( job.Context.Run, _options.Claimant, WorkerNumber )
+						renewed = await _coordinator.RenewClaimAsync( job.Context.Run, _options.Claimant, _worker )
 													.ConfigureAwait( false );
 					}
 					catch( Exception exception )
 					{
 						_logger.LogWarning( exception,
 											"Worker {Claimant}/{Worker} failed to renew claim of run {Run}; will retry.",
-											_options.Claimant, WorkerNumber, job.Context.Run );
+											_options.Claimant, _worker, job.Context.Run );
 
 						continue;
 					}
 
 					if( renewed )
 						_logger.LogDebug( "Worker {Claimant}/{Worker} renewed claim of run {Run}.",
-										_options.Claimant, WorkerNumber, job.Context.Run );
+										_options.Claimant, _worker, job.Context.Run );
 
 					if( !renewed )
 					{

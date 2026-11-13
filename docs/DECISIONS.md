@@ -187,7 +187,8 @@ makes the call. This leaves one extension point instead of two.
   whatever the outcome; dispose failures are logged and swallowed.
 - **Two new projects.** `Pug.Scheduling.JobHandler.Abstractions` (multi-target, depends on Models
   only: all a handler author needs) and `Pug.Scheduling.Worker.DependencyInjection` (net10.0;
-  `AddSchedulingWorker`, `AddScheduledJobHandler<T>`, `AddScheduledJobHandlerFactory<T>`). The
+  `AddSchedulingWorker` — `AddSchedulingWorkers` since D20 — `AddScheduledJobHandler<T>`,
+  `AddScheduledJobHandlerFactory<T>`). The
   worker host's DI is separate from the scheduler's because an out-of-process worker host must not
   reference `Pug.Scheduling`, the data stores or the lease stores. `AddScheduledJobHandler<T>` keeps
   one DI scope per run: its factory creates the scope and the returned handler wrapper disposes it.
@@ -206,7 +207,7 @@ scheduler host serves more than one scheduling surface at once (user directive).
 |---|---|---|
 | `MapSchedulingEndpoints()` | `Pug.Scheduling.WebApi` | `GET/POST schedules`, `GET/PUT/DELETE schedules/{identifier}`, `POST schedules/{identifier}/pause|resume|run`, `GET schedules/{identifier}/runs` |
 | `MapExecutionCoordinatorEndpoints()` | `Pug.Scheduling.WebApi` | `POST executionCoordinator/JobRunClaims`, `POST executionCoordinator/JobRuns/{run}/leaseRenewal?claimant=&worker=`, `POST executionCoordinator/JobRuns/{run}/completion?claimant=&worker=` |
-| `MapSchedulerWorkerEndpoints()` | `Pug.Scheduling.Worker.WebApi` | `GET worker`, `POST worker/pause|resume` |
+| `MapSchedulerWorkerEndpoints()` | `Pug.Scheduling.Worker.WebApi` | `GET workers`, `GET workers/{worker}`, `POST workers/{worker}/pause|resume` (D20) |
 
 - **Coordinator endpoints are the out-of-process worker's transport** (user directive): the wire
   contract is `IExecutionCoordinator` unchanged, so D5 holds over HTTP — a remote worker still
@@ -222,7 +223,15 @@ scheduler host serves more than one scheduling surface at once (user directive).
   other.
 - **Worker management endpoints are their own package** `Pug.Scheduling.Worker.WebApi` (user
   directive): a worker hosted out-of-process reaches the scheduler solely through the coordinator
-  transport and must not have to reference packages it does not need.
+  transport and must not have to reference packages it does not need. They manage the workers
+  hosted in the serving process through `ISchedulerWorkerRegistry`, addressing each by its
+  host-wide worker number (D20): `GET workers` lists only the workers whose claimant the caller
+  holds `GetInfo` for (200 with an empty array when none — the caller may be entitled to workers
+  another host runs); `GET workers/{worker}` returns one `WorkerInfo`; `POST
+  workers/{worker}/pause|resume` return the resulting `WorkerInfo`. An unknown number is 404 and a
+  missing grant on that worker's claimant 403. The number comes before the grant check because the
+  claimant the grant is qualified by is the worker's, so an authenticated caller can learn which
+  numbers exist, nothing more.
 - **Authorization stays with the facades** (see D16). Schedule and coordinator endpoints perform
   none of their own; they require an authenticated caller and map outcomes: `NotAuthorized` → 403,
   `UnknownScheduleException`/`UnknownRunException` → 404, `ClaimNotHeldException` → 409 (completion
@@ -232,7 +241,8 @@ scheduler host serves more than one scheduling surface at once (user directive).
   no owner exemption.
 - **`ISchedulerWorker` moved to Abstractions and `WorkerInfo` to Models** (from
   `Pug.Scheduling.Worker`): both WebApi packages multi-target `net6.0;net8.0;net10.0` and cannot
-  reference the net10.0-only worker implementation. The interface stays synchronous — it manages
+  reference the net10.0-only worker implementation. `ISchedulerWorkerRegistry` sits beside it for
+  the same reason (D20). The interface stays synchronous — it manages
   the locally hosted instance, not a remote one.
 - **Owner is conveyed as an `ownerType`/`ownerIdentifier` query pair** (Groups' `Subject`
   convention) rather than a new request contract; supplying one half without the other is a 400.
@@ -337,6 +347,51 @@ shifted a value that was already UTC. Both SQLite sessions now stamp `DateTimeKi
 Surfaced by the client round-trip tests, which assert on `Kind` because the wire format makes the
 difference visible; the in-process tests had only ever compared instants.
 
+## D20 — Worker groups, host-wide numbering, per-worker management (execution rework, sub-phase C)
+
+A worker host runs one or more **worker groups**. `AddSchedulingWorkers( WorkerOptions options =
+null, Func<IServiceProvider, IExecutionCoordinator> coordinator = null )` replaces
+`AddSchedulingWorker` and is called once per group. A group is `WorkerOptions.Workers` (default 1)
+identical `SchedulerWorker`s sharing a `Claimant` and an optional `JobType` filter (null claims any
+type); each worker claims, executes and reports one job at a time.
+
+- **Numbers are host-wide and deterministic**: 1..N across every group, in registration order,
+  assigned at registration by an accumulator kept as a singleton instance in the service
+  collection (the `JobTypeRegistrations` pattern). Unique-per-host numbers keep holders distinct
+  even when two groups share a claimant; deterministic ones make a restarted host present the same
+  holders again. A worker is constructed with its number; it claims with `ClaimDueJobAsync(
+  claimant, number, JobType )` and renews and reports with the same number.
+- **The default claimant is `Environment.MachineName`**, stable across restarts (the random suffix
+  is gone). **Restart takeover** follows from D16: a restarted worker presenting the same claimant
+  and number is the same lease holder (`claimant/number`), re-takes its own live lease and adopts
+  its unfinished run instead of waiting out the lease. The corollary: **two worker processes on one
+  machine must set distinct claimants**, or their identically numbered workers would take each
+  other's claims as their own.
+- **Validation** (`WorkerOptions.Validate()`, run at registration and by the worker): claimant not
+  blank and free of `/`; `Workers >= 1`; `JobType` null or not blank. The worker additionally
+  requires a number of 1 or more. An invalid group fails at `AddSchedulingWorkers` and consumes no
+  numbers.
+- **Per-group coordinator credentials.** The optional `coordinator` factory supplies the group's
+  `IExecutionCoordinator` — typically an `ExecutionCoordinatorClient` whose `HttpApiClient` carries
+  the group's own credentials decorator, matching grants qualified by that group's claimant (D16).
+  It is invoked once per group and the result shared by the group's workers; without it the group
+  resolves `IExecutionCoordinator` from the container.
+- **Per-worker management.** `ISchedulerWorker` stays per instance; the single `ISchedulerWorker`
+  registration is replaced by `ISchedulerWorkerRegistry { Workers; Find( worker ) }` in
+  Abstractions (implemented by `SchedulerWorkerRegistry` in `Pug.Scheduling.Worker`), so the
+  multi-targeted endpoints can see it. `WorkerInfo` gains `Worker` and `JobType`. Routes and
+  authorization: D15. Grants remain `SCHEDULER_WORKER` qualified by the worker's claimant, so a
+  group's workers share them.
+- **Each worker is its own `IHostedService` singleton**, registered as `AddSingleton<IHostedService>(
+  provider => registry.Find( number ) )` — the same instance the registry hands to management.
+  **Not `AddHostedService( factory )`**: it uses `TryAddEnumerable`, which deduplicates factory
+  registrations by implementation type, so every `SchedulerWorker` after the first would be dropped
+  silently. Tests assert N distinct hosted services and N workers polling; swapping
+  `AddHostedService` back in fails them.
+- Worker log lines that describe the worker (started, stopping, paused, resumed, claim failure,
+  no due work) carry `{Claimant}/{Worker}` and the group's `{JobType}` (`any` when unfiltered); job
+  lines keep the job's `{JobType}`.
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**
@@ -355,8 +410,8 @@ from tested SQLite only in DDL types and boolean predicates; run Testcontainers 
 - **Execution rework** (plan: single-job workers, no dispatcher, worker groups):
   **A coordinator contract (`claimant` + `worker`, one job per claim, job-type filter, candidate
   window, schema v2 index) and coordinator logging — DONE (107 tests)**; **B job-handler projects /
-  factory registry / no dispatcher (D19, 123 tests) — DONE**; C worker groups and per-worker
-  management — pending.
+  factory registry / no dispatcher (D19, 123 tests) — DONE**; **C worker groups, host-wide
+  numbering, per-worker management (D20, 154 tests) — DONE**.
 - **Phase 1 COMPLETE.** Carry-overs: Postgres Testcontainers races in CI; webhook dispatch (D14, superseded by D19:
   a webhook is now a handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).

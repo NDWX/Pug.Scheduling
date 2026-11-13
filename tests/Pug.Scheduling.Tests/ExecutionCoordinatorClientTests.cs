@@ -200,6 +200,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 					PollInterval = TimeSpan.FromMilliseconds( 50 ),
 					HeartbeatInterval = TimeSpan.FromSeconds( 30 )
 				},
+				1,
 				NullLogger<Worker.SchedulerWorker>.Instance );
 
 		await worker.StartAsync( CancellationToken.None );

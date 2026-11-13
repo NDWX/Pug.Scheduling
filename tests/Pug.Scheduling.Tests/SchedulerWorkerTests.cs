@@ -24,6 +24,9 @@ public class SchedulerWorkerTests
 
 		public (string Claimant, int Worker)? ReportedBy { get; private set; }
 
+		// The caller identity of the latest renewal.
+		public (string Claimant, int Worker)? RenewedBy { get; private set; }
+
 		public FakeCoordinator( ClaimedJob job )
 		{
 			_job = job;
@@ -39,7 +42,12 @@ public class SchedulerWorkerTests
 			return Task.FromResult( job );
 		}
 
-		public Task<bool> RenewClaimAsync( string run, string claimant, int worker ) => Task.FromResult( true );
+		public Task<bool> RenewClaimAsync( string run, string claimant, int worker )
+		{
+			RenewedBy = ( claimant, worker );
+
+			return Task.FromResult( true );
+		}
 
 		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
 		{
@@ -70,11 +78,13 @@ public class SchedulerWorkerTests
 		};
 
 	private static async Task<(string Run, string Result, JobOutcome Outcome)> RunWorkerAsync(
-		FakeCoordinator coordinator, IScheduledJobHandlerFactoryRegistry registry )
+		FakeCoordinator coordinator, IScheduledJobHandlerFactoryRegistry registry, WorkerOptions? options = null,
+		int number = 1 )
 	{
 		SchedulerWorker worker = new(
 				coordinator, registry,
-				new WorkerOptions { Claimant = "test-worker", PollInterval = TimeSpan.FromMilliseconds( 50 ) },
+				options ?? new WorkerOptions { Claimant = "test-worker", PollInterval = TimeSpan.FromMilliseconds( 50 ) },
+				number,
 				NullLogger<SchedulerWorker>.Instance );
 
 		await worker.StartAsync( CancellationToken.None );
@@ -227,5 +237,117 @@ public class SchedulerWorkerTests
 		Assert.Equal( RunResults.Failed, result );
 		Assert.False( outcome.Successful );
 		Assert.Equal( "Job handler factory returned no handler.", outcome.Error );
+	}
+
+	[Fact]
+	public async Task WorkerClaimsRenewsAndReportsWithItsNumberAndJobType()
+	{
+		FakeCoordinator coordinator = new( NewJob() );
+
+		// Holds the run long enough for a heartbeat.
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					await Task.Delay( TimeSpan.FromMilliseconds( 300 ), cancellationToken );
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		await RunWorkerAsync(
+				coordinator, Registry( handler ),
+				new WorkerOptions
+				{
+					Claimant = "report-workers",
+					JobType = "test",
+					PollInterval = TimeSpan.FromMilliseconds( 50 ),
+					HeartbeatInterval = TimeSpan.FromMilliseconds( 50 )
+				},
+				number: 3 );
+
+		Assert.Equal( ( "report-workers", 3, (string?)"test" ), coordinator.ClaimedBy );
+		Assert.Equal( ( "report-workers", 3 ), coordinator.RenewedBy );
+		Assert.Equal( ( "report-workers", 3 ), coordinator.ReportedBy );
+	}
+
+	[Fact]
+	public void InfoReportsTheWorkersNumberAndJobType()
+	{
+		using SchedulerWorker worker = new(
+				new FakeCoordinator( NewJob() ), Registry( new DelegateJobHandler( ( _, _, _ ) => null! ) ),
+				new WorkerOptions { Claimant = "report-workers", JobType = "report" },
+				7,
+				NullLogger<SchedulerWorker>.Instance );
+
+		WorkerInfo info = worker.GetInfo();
+
+		Assert.Equal( "report-workers", info.Claimant );
+		Assert.Equal( 7, info.Worker );
+		Assert.Equal( "report", info.JobType );
+		Assert.Equal( 7, worker.Number );
+		Assert.False( info.Paused );
+		Assert.Null( info.LastPoll );
+	}
+
+	[Theory]
+	[InlineData( 0 )]
+	[InlineData( -1 )]
+	public void NumberBelowOneIsRejected( int number )
+	{
+		ArgumentOutOfRangeException exception = Assert.Throws<ArgumentOutOfRangeException>(
+				() => new SchedulerWorker(
+						new FakeCoordinator( NewJob() ), Registry( new DelegateJobHandler( ( _, _, _ ) => null! ) ),
+						new WorkerOptions(), number, NullLogger<SchedulerWorker>.Instance ) );
+
+		Assert.Equal( "number", exception.ParamName );
+	}
+
+	[Fact]
+	public void InvalidOptionsAreRejectedByTheWorker()
+	{
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				() => new SchedulerWorker(
+						new FakeCoordinator( NewJob() ), Registry( new DelegateJobHandler( ( _, _, _ ) => null! ) ),
+						new WorkerOptions { Claimant = "group/1" }, 1, NullLogger<SchedulerWorker>.Instance ) );
+
+		Assert.Equal( nameof(WorkerOptions.Claimant), exception.ParamName );
+	}
+
+	[Fact]
+	public void DefaultOptionsClaimAnyTypeAsOneWorkerUnderTheMachineName()
+	{
+		WorkerOptions options = new();
+
+		// Stable across restarts, so a restarted worker re-takes its own lease.
+		Assert.Equal( Environment.MachineName, options.Claimant );
+		Assert.Equal( 1, options.Workers );
+		Assert.Null( options.JobType );
+
+		options.Validate();
+	}
+
+	[Theory]
+	[InlineData( null, 1, null, nameof(WorkerOptions.Claimant) )]
+	[InlineData( "", 1, null, nameof(WorkerOptions.Claimant) )]
+	[InlineData( "  ", 1, null, nameof(WorkerOptions.Claimant) )]
+	[InlineData( "host/a", 1, null, nameof(WorkerOptions.Claimant) )]
+	[InlineData( "host", 0, null, nameof(WorkerOptions.Workers) )]
+	[InlineData( "host", -2, null, nameof(WorkerOptions.Workers) )]
+	[InlineData( "host", 1, "", nameof(WorkerOptions.JobType) )]
+	[InlineData( "host", 1, " ", nameof(WorkerOptions.JobType) )]
+	public void InvalidOptionsAreRejected( string? claimant, int workers, string? jobType, string property )
+	{
+		WorkerOptions options = new() { Claimant = claimant!, Workers = workers, JobType = jobType! };
+
+		ArgumentException exception = Assert.Throws<ArgumentException>( options.Validate );
+
+		Assert.Equal( property, exception.ParamName );
+	}
+
+	[Theory]
+	[InlineData( "host", 1, null )]
+	[InlineData( "host-2.example", 4, "report" )]
+	public void ValidOptionsAreAccepted( string claimant, int workers, string? jobType )
+	{
+		new WorkerOptions { Claimant = claimant, Workers = workers, JobType = jobType! }.Validate();
 	}
 }

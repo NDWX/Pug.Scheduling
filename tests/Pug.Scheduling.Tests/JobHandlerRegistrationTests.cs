@@ -54,7 +54,7 @@ public class JobHandlerRegistrationTests
 		services.AddSingleton( seen );
 		services.AddScoped<ScopedDependency>();
 		services.AddScheduledJobHandler<ScopedDependencyHandler>( "report" );
-		services.AddSchedulingWorker();
+		services.AddSchedulingWorkers();
 
 		return services.BuildServiceProvider();
 	}
