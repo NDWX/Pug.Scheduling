@@ -403,9 +403,64 @@ instead of moving to the next candidate. SQLite serializes writers and never sho
 transaction — the semantics the single-statement arbitration (D6) was written for — and lease
 state is never committed as part of a caller's transaction.
 
-The schedule store still runs at the default Serializable. Its writes are serialized by the lease,
-so no test races them; a completion racing an adoption of the same run could surface `40001` rather
-than `ClaimNotHeldException`.
+The schedule store followed in D22.
+
+## D22 — The schedule store runs READ COMMITTED; adoption is conditional (#5)
+
+**Every schedule-store unit of `ExecutionCoordinator` and `Scheduler` runs in its own
+(`RequiresNew`) READ COMMITTED transaction**, the D21 pattern. This was checked unit by unit: none
+acts on a read made in the same transaction. The coordinator's reads (due candidates, latest run,
+run, schedule) and the `Scheduler`'s read of the existing schedule are units of their own. The
+multi-statement units only write: insert run + clear request, skip run + record occurrence,
+complete run + record occurrence, and the `Scheduler`'s two deletes. Races between writers are
+settled by single-statement conditions (`CompleteRunAsync`, now `ClaimRunAsync`) and by the
+execution lease. Serializable therefore protected nothing. On Postgres it made the loser of a race
+on one row fail with `40001` instead of having its conditional write affect no rows, or instead of
+applying its write once the other committed. The race tests reproduce this when either facade is
+put back to Serializable:
+- a late completion racing an adoption: `40001` on either side;
+- `Pause`/`RunNow`/`UpdateDefinition` racing a completion: `40001` on the management side, or a
+  completion rolled back. A rolled-back completion leaves its run unfinished, to be adopted and
+  executed again.
+
+**Adoption is conditional.** `IDataSession.ClaimRunAsync` returns `bool` and updates only `where
+identifier = @run and finished is null`. A late completion by the previous holder can land between
+the claim's latest-run read and its adoption. When it does, the claim adopts nothing: it logs a
+warning, releases the lease, leaves any run request alone, and moves to the next candidate. The
+unconditional transfer handed the adopter an already-finished run to execute again.
+
+**A claim never re-records a finished occurrence.** The due candidate is read before the lease is
+taken, and the "advanced since the due read" check used that same stale read, so it could not fire.
+A completion that landed between the due read and the latest-run read left the claim inserting the
+same `(schedule, scheduledFor, attempt)` again. That fails on `uxScheduleRunFire`, a raw exception
+out of `ClaimDueJobAsync`. Both providers showed it. When the latest run is finished and is
+exactly the occurrence and attempt about to be recorded, the candidate is now discarded as stale,
+the same way. The decision rests on the finished run itself, not on the schedule's advance:
+**SQLite units are not atomic.** Microsoft.Data.Sqlite connections do not enlist in the
+`TransactionScope`, so each statement commits on its own (a probe confirmed it: a write followed
+by an exception is not rolled back, under either scope). A completion's finished run can therefore
+be visible on SQLite before its schedule advance. On SQLite the isolation options are a no-op.
+
+Trade-offs of leaving Serializable:
+- **Pause / resume vs. completion:** different columns; both apply. No loss.
+- **`RunNow` vs. completion:** last writer wins on `nextRun`/`runRequested`. A request recorded
+  before the completion is cleared by it, as it always was for a request raised while a run is
+  executing.
+- **`UpdateDefinition` vs. completion: a lost update that predates D22.** With an unchanged
+  recurrence, the update writes back the `nextRun` it read before the completion. If the
+  completion commits in between, the schedule's `nextRun` reverts to the occurrence just executed.
+  Nothing executes twice: every claim finds that occurrence and attempt already finished and
+  discards the candidate (before D22 it failed on `uxScheduleRunFire` instead). But the schedule
+  stalls until a later definition update or run request moves `nextRun`. When the recurrence
+  changes, the completion's `nextRun`, computed from the old recurrence, can win once instead.
+  Both reads sit in units separate from their writes, so Serializable never covered them; it only
+  turned the in-flight subcase into `40001`. A variant of the race test that asserts the advance
+  showed the lost update at Serializable as well as at READ COMMITTED, on both providers. Not
+  fixed here. The fix is to write `nextRun` only when the recurrence changes, or only if it still
+  holds the value read.
+- **Ambient transactions:** like the lease provider, the facades no longer enlist in a caller's
+  `TransactionScope`. A host that wrapped `RegisterAsync` in a transaction of its own no longer has
+  the registration enlisted in it (Postgres; SQLite never enlisted).
 
 ## Verification conventions
 
@@ -433,6 +488,10 @@ Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
 - **Postgres test coverage (#3)** — store-backed suites on both providers, Postgres via
   Testcontainers, plus a many-coordinators claim race; lease arbitration fixed to READ COMMITTED
   (D21) — **DONE (210 tests: 155 SQLite/other, 55 Postgres)**.
+- **Schedule-store isolation (#5)** — coordinator and scheduler units READ COMMITTED, conditional
+  adoption, finished-occurrence guard on claim; late-completion-vs-adoption and
+  management-vs-completion race tests on both providers (D22) — **DONE (214 tests: 157
+  SQLite/other, 57 Postgres)**.
 - **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
   handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).

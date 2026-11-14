@@ -348,12 +348,14 @@ namespace Pug.Scheduling.Data.SQLite
 				);
 		}
 
-		public Task ClaimRunAsync( string run, string claimedBy )
+		public async Task<bool> ClaimRunAsync( string run, string claimedBy )
 		{
-			return Connection.ExecuteAsync(
-					"update scheduleRun set claimedBy = @claimedBy where identifier = @run;",
-					new { run, claimedBy }
-				);
+			int updated = await Connection.ExecuteAsync(
+									"update scheduleRun set claimedBy = @claimedBy where identifier = @run and finished is null;",
+									new { run, claimedBy }
+								).ConfigureAwait( false );
+
+			return updated > 0;
 		}
 
 		public async Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result,
