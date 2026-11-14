@@ -502,8 +502,32 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( 0, state.State.Attempt );
 		Assert.Null( state.State.Occurrence );
 		Assert.Equal( RunResults.Succeeded, state.State.LastRun!.Result );
-		Assert.Equal( Now.AddHours( 1 ), state.State.NextRun );
+		Assert.Equal( job.Context.ScheduledFor.AddHours( 1 ), state.State.NextRun );
 		Assert.Null( state.ExecutionLease );
+	}
+
+	// D12: interval mode is arithmetic from the previous occurrence, so completing late never
+	// shifts the grid.
+	[Fact]
+	public async Task IntervalScheduleDoesNotDriftAcrossLateCompletions()
+	{
+		DateTime occurrence = Now.AddSeconds( -1 );
+		string schedule = await InsertScheduleAsync( occurrence );
+
+		for( int run = 1; run <= 3; run++ )
+		{
+			ClaimedJob job = await ClaimSingleAsync( schedule );
+
+			_clock.Advance( TimeSpan.FromMinutes( 17 ) );
+
+			await CompleteAsync( job );
+
+			occurrence = occurrence.AddHours( 1 );
+
+			Assert.Equal( occurrence, ( await GetScheduleAsync( schedule ) ).State.NextRun );
+
+			_clock.Advance( occurrence - Now + TimeSpan.FromSeconds( 1 ) );
+		}
 	}
 
 	[Fact]
@@ -543,7 +567,10 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	{
 		string schedule = await InsertDueScheduleAsync( maximumAttempts: 2 );
 
-		await CompleteAsync( await ClaimSingleAsync( schedule ), result: RunResults.Failed );
+		ClaimedJob first = await ClaimSingleAsync( schedule );
+		DateTime occurrence = first.Context.ScheduledFor;
+
+		await CompleteAsync( first, result: RunResults.Failed );
 
 		_clock.Advance( TimeSpan.FromMinutes( 1 ) );
 
@@ -555,7 +582,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( 0, state.State.Attempt );
 		Assert.Null( state.State.Occurrence );
 		Assert.Equal( RunResults.TimedOut, state.State.LastRun!.Result );
-		Assert.Equal( Now.AddHours( 1 ), state.State.NextRun );
+		Assert.Equal( occurrence.AddHours( 1 ), state.State.NextRun );
 	}
 
 	[Fact]
@@ -617,7 +644,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		await CompleteAsync( job );
 
-		Assert.Equal( Now.AddHours( 3 ), ( await GetScheduleAsync( schedule ) ).State.NextRun );
+		Assert.Equal( job.Context.ScheduledFor.AddHours( 3 ), ( await GetScheduleAsync( schedule ) ).State.NextRun );
 	}
 
 	// == Misfire ==
@@ -625,7 +652,8 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	[Fact]
 	public async Task MisfireSkipRecordsSkippedRunAndAdvances()
 	{
-		string schedule = await InsertScheduleAsync( Now.AddMinutes( -10 ), MisfireHandlings.Skip );
+		DateTime occurrence = Now.AddMinutes( -10 );
+		string schedule = await InsertScheduleAsync( occurrence, MisfireHandlings.Skip );
 
 		// The only due occurrence was disposed of without execution.
 		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 5, _jobType ) );
@@ -639,7 +667,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		ScheduleInfo state = await GetScheduleAsync( schedule );
 
-		Assert.Equal( Now.AddHours( 1 ), state.State.NextRun );
+		Assert.Equal( occurrence.AddHours( 1 ), state.State.NextRun );
 		Assert.Equal( RunResults.Skipped, state.State.LastRun!.Result );
 		Assert.Null( state.ExecutionLease );
 	}
@@ -816,7 +844,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Null( repaired.ExecutionLease );
 		Assert.NotEqual( finishedAt, Now );
 		Assert.Equal( finishedAt, repaired.State.LastRun!.Finished );
-		Assert.Equal( Now.AddHours( 1 ), repaired.State.NextRun );
+		Assert.Equal( job.Context.ScheduledFor.AddHours( 1 ), repaired.State.NextRun );
 		Assert.Equal( RunResults.Succeeded, repaired.State.LastRun!.Result );
 		Assert.Equal( $"{Claimant}/1", Assert.Single( await GetRunsAsync( schedule ) ).ClaimedBy );
 	}
@@ -927,7 +955,8 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	[Fact]
 	public async Task ManualRunCoalescesDueBacklogUnderFireOnce()
 	{
-		string schedule = await InsertScheduleAsync( Now.AddHours( -3 ) );
+		DateTime backlog = Now.AddHours( -3 );
+		string schedule = await InsertScheduleAsync( backlog );
 
 		await _scheduler.RunNowAsync( schedule );
 
@@ -937,7 +966,8 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		await CompleteAsync( manual );
 
-		Assert.Equal( Now.AddHours( 1 ), ( await GetScheduleAsync( schedule ) ).State.NextRun );
+		// Coalesced onto the grid the backlog was on: its next slot after now.
+		Assert.Equal( backlog.AddHours( 4 ), ( await GetScheduleAsync( schedule ) ).State.NextRun );
 		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 1, _jobType ) );
 	}
 
@@ -1230,7 +1260,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 			// The completion applied: its run finished, the schedule recorded it and advanced.
 			bool completed = runs.Length == 1 && runs[0].Finished is not null &&
 							after.State.LastRun?.Result == RunResults.Succeeded &&
-							after.State.NextRun == Now.AddHours( 1 ) && after.ExecutionLease is null;
+							after.State.NextRun == job.Context.ScheduledFor.AddHours( 1 ) && after.ExecutionLease is null;
 
 			bool managed = operation switch
 			{
@@ -1265,6 +1295,12 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	public Task RecurrenceChangeRacingCompletionAlwaysWins() =>
 		DefinitionUpdatesRacingCompletionsAsync( TimeSpan.FromHours( 3 ) );
 
+	// Whichever of the update and the completion commits last decides the phase: a completion after
+	// a recurrence change continues the new grid from the occurrence it ran (D12); an update after
+	// the completion restarts it from the update's time. An unchanged recurrence only has the first.
+	private bool IsExpectedNextRun( DateTime? nextRun, DateTime occurrence, TimeSpan interval ) =>
+		nextRun == occurrence + interval || ( interval != TimeSpan.FromHours( 1 ) && nextRun == Now + interval );
+
 	private async Task DefinitionUpdatesRacingCompletionsAsync( TimeSpan updatedInterval )
 	{
 		const int iterations = 60;
@@ -1293,13 +1329,13 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 			ScheduleInfo after = await GetScheduleAsync( schedule );
 
-			if( completionError is not null || updateError is not null || after.State.NextRun != Now + updatedInterval ||
+			if( completionError is not null || updateError is not null || !IsExpectedNextRun( after.State.NextRun, job.Context.ScheduledFor, updatedInterval ) ||
 				after.Definition.Name != updated.Name )
 				failures.Add(
 						$"iteration {iteration} (stagger {stagger.TotalMilliseconds} ms): " +
 						$"completion {Describe( completionError )}; update {Describe( updateError )}; " +
 						$"next run {after.State.NextRun:O} (occurrence {job.Context.ScheduledFor:O}, " +
-						$"expected {Now + updatedInterval:O}); name {after.Definition.Name}" );
+						$"expected {job.Context.ScheduledFor + updatedInterval:O} or {Now + updatedInterval:O}); name {after.Definition.Name}" );
 
 			await DeleteScheduleAsync( schedule );
 		}

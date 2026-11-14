@@ -34,10 +34,10 @@ namespace Pug.Scheduling.Abstractions
 		Task<ScheduleInfo> GetScheduleAsync( string identifier );
 
 		// Replaces the schedule's definition wholesale, re-validating as for registration, and
-		// recomputes the next occurrence from now when the recurrence changed and no retry is
-		// pending (attempt 0), even while a run is in progress; that run's completion then
-		// recomputes the next occurrence again from the updated definition. With a retry pending,
-		// the retry keeps its time and the new recurrence applies once the occurrence completes.
+		// recomputes the next occurrence from now when the recurrence changed and the schedule is
+		// idle (no run in progress, no retry pending). During a run, or with a retry pending,
+		// the next occurrence is left alone: the run's completion (or the retry's occurrence
+		// ending) then applies the new recurrence from the occurrence it ran.
 		// A run in progress, a pending retry and a run request are themselves left as they are.
 		// Domain is immutable: a definition carrying a different value is rejected (the
 		// schedule's Owner is not part of the definition and can never change). Updates the

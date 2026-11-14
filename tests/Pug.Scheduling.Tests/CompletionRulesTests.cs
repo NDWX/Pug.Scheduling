@@ -24,7 +24,7 @@ public class CompletionRulesTests
 		};
 
 	[Fact]
-	public void SuccessEndsTheOccurrenceAndAdvancesFromNow()
+	public void SuccessEndsTheOccurrenceAndAdvancesOnTheGrid()
 	{
 		DateTime occurrence = Now.AddMinutes( -2 );
 
@@ -33,10 +33,22 @@ public class CompletionRulesTests
 
 		Assert.Equal( 0, progress.Attempt );
 		Assert.Null( progress.Occurrence );
-		Assert.Equal( Now.AddHours( 1 ), progress.NextRun );
+		Assert.Equal( occurrence.AddHours( 1 ), progress.NextRun );
 		Assert.Equal( new RunSummary { Started = Now.AddMinutes( -1 ), Finished = Now, Result = RunResults.Succeeded },
 					progress.LastRun );
 		Assert.False( progress.RunRequested );
+	}
+
+	[Fact]
+	public void LateCompletionKeepsTheGridPhaseAndCoalescesMissedSlots()
+	{
+		DateTime occurrence = Now.AddMinutes( -150 );
+
+		OccurrenceProgress progress = CompletionRules.Next(
+				Schedule( occurrence ), Run( occurrence ), RunResults.Succeeded, Now );
+
+		// Slots at -90 and -30 minutes were missed; the next is +30, not Now + 1h.
+		Assert.Equal( Now.AddMinutes( 30 ), progress.NextRun );
 	}
 
 	[Fact]
@@ -82,7 +94,7 @@ public class CompletionRulesTests
 
 		Assert.Equal( 0, progress.Attempt );
 		Assert.Null( progress.Occurrence );
-		Assert.Equal( Now.AddHours( 1 ), progress.NextRun );
+		Assert.Equal( occurrence.AddHours( 1 ), progress.NextRun );
 		Assert.Equal( RunResults.Failed, progress.LastRun!.Result );
 	}
 
@@ -159,7 +171,7 @@ public class CompletionRulesTests
 	}
 
 	[Fact]
-	public void SkipAdvancesFromNowAndRecordsTheSkip()
+	public void SkipAdvancesOntoTheGridAndRecordsTheSkip()
 	{
 		DateTime occurrence = Now.AddHours( -2 );
 
@@ -197,5 +209,19 @@ public class CompletionRulesTests
 		ScheduleInfo retrying = Schedule( Now.AddMinutes( 1 ), 1, Now.AddMinutes( -5 ) );
 
 		Assert.Equal( Now.AddMinutes( 1 ), DefinitionRules.NextRunAfterUpdate( retrying, threeHourly, Now ) );
+	}
+
+	[Fact]
+	public void UpdateWithChangedRecurrenceDuringARunKeepsTheNextRun()
+	{
+		ScheduleInfo running = Schedule(
+				Now.AddMinutes( -1 ),
+				lease: Lease( "worker-1/1", Now.AddMinutes( 5 ) ) );
+		ScheduleDefinition threeHourly = running.Definition with
+		{
+			Recurrence = running.Definition.Recurrence with { Interval = TimeSpan.FromHours( 3 ) }
+		};
+
+		Assert.Equal( Now.AddMinutes( -1 ), DefinitionRules.NextRunAfterUpdate( running, threeHourly, Now ) );
 	}
 }

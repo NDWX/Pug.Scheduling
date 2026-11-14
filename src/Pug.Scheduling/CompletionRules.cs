@@ -59,15 +59,14 @@ namespace Pug.Scheduling
 					schedule.State.RunRequested );
 
 		// The occurrence after occurrence, which ended (completed, terminally failed, skipped or
-		// coalesced) at now. RUN_ALL executes every missed occurrence, so it continues from the one
-		// that ended; the other policies coalesce and continue from now.
+		// coalesced) at now. RUN_ALL executes every missed occurrence, so it steps once from the
+		// one that ended; the other policies coalesce every slot missed by now onto the recurrence's
+		// grid, keeping its phase.
 		public static DateTime? NextOccurrence( ScheduleDefinition definition, DateTime occurrence, DateTime now )
 		{
-			DateTime baseline = definition.MisfirePolicy.Handling == MisfireHandlings.RunAll
-									? DateTime.SpecifyKind( occurrence, DateTimeKind.Utc )
-									: now;
+			DateTime after = definition.MisfirePolicy.Handling == MisfireHandlings.RunAll ? occurrence : now;
 
-			return RecurrenceCalculator.GetNextOccurrence( definition.Recurrence, baseline );
+			return RecurrenceCalculator.GetNextOccurrence( definition.Recurrence, occurrence, after );
 		}
 
 		// A manual run proper: requested by run-now with no retry pending. One claimed during a

@@ -40,7 +40,7 @@ public class OccurrenceStateTests
 			ExecutionLease = lease
 		};
 
-	private static ExecutionLease Lease( string holder, DateTime expiry ) =>
+	internal static ExecutionLease Lease( string holder, DateTime expiry ) =>
 		new() { Run = "run-1", ClaimedBy = holder, Expiry = expiry };
 
 	// The action is an object: xunit needs public signatures, and OccurrenceAction is internal.

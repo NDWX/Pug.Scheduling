@@ -171,7 +171,7 @@ namespace Pug.Scheduling
 				{
 					Enabled = true,
 					Paused = false,
-					NextRun = RecurrenceCalculator.GetNextOccurrence( definition.Recurrence, UtcNow ),
+					NextRun = RecurrenceCalculator.GetFirstOccurrence( definition.Recurrence, UtcNow ),
 					Attempt = 0
 				},
 				Registration = CreateActionContext()

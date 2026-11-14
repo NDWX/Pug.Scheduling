@@ -135,9 +135,9 @@ the marker) — deliberate.
 ## D11 — Misfire policies
 
 Occurrence is misfired when overdue beyond `MisfirePolicy.Threshold` (default 5 min).
-`FIRE_ONCE` (default): coalesce — execute once (trigger MISFIRE), next occurrence computed from
-now. `SKIP`: record a SKIPPED run (audit trail), advance, release — no execution. `RUN_ALL`:
-execute, and completion computes the next occurrence from the *executed* occurrence, naturally
+`FIRE_ONCE` (default): coalesce — execute once (trigger MISFIRE), next occurrence is the first grid
+slot after now (`Next( r, T, now )`, phase kept). `SKIP`: record a SKIPPED run (audit trail), advance, release — no execution. `RUN_ALL`:
+execute, and completion steps one slot from the *executed* occurrence (`Next( r, T, T )`), naturally
 catching up one by one.
 
 ## D12 — Time and storage conventions
