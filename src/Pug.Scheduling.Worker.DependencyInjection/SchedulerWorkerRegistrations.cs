@@ -39,6 +39,9 @@ namespace Pug.Scheduling.Worker.DependencyInjection
 			IScheduledJobHandlerFactoryRegistry handlerFactories =
 				provider.GetRequiredService<IScheduledJobHandlerFactoryRegistry>();
 
+			// The host's clock when it registers one (as AddScheduling uses it), else the system's.
+			TimeProvider timeProvider = provider.GetService<TimeProvider>() ?? TimeProvider.System;
+
 			ILogger<SchedulerWorker> logger = provider.GetRequiredService<ILogger<SchedulerWorker>>();
 
 			List<SchedulerWorker> workers = new( Workers );
@@ -55,7 +58,8 @@ namespace Pug.Scheduling.Worker.DependencyInjection
 				for( int index = 0; index < group.Options.Workers; index++ )
 					workers.Add(
 							new SchedulerWorker(
-									coordinator, handlerFactories, group.Options, group.FirstWorker + index, logger ) );
+									coordinator, handlerFactories, group.Options, group.FirstWorker + index,
+									timeProvider, logger ) );
 			}
 
 			return new SchedulerWorkerRegistry( workers );

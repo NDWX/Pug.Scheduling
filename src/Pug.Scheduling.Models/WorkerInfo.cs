@@ -81,5 +81,18 @@ namespace Pug.Scheduling.Models
 			set;
 #endif
 		}
+
+		// Handlers the worker detached because they did not stop within its cancellation grace,
+		// still running unattended. At its limit the worker stops claiming.
+		[Required, DataMember( IsRequired = true )]
+		public int DetachedJobs
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
 	}
 }
