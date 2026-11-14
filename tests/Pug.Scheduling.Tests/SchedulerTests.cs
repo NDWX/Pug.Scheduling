@@ -232,6 +232,33 @@ public abstract class SchedulerTests<TScheduleDatabase>
 
 		await Assert.ThrowsAsync<UnknownScheduleException>( () => _scheduler.GetScheduleAsync( "missing" ) );
 	}
+
+	[Fact]
+	public async Task TimeoutBeyondTheTimerBoundIsRejected()
+	{
+		ScheduleDefinition definition = NewDefinition() with { Timeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) };
+
+		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( definition ) );
+
+		Assert.Equal( "definition", exception.ParamName );
+
+		// The bound itself is accepted.
+		await _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimerBounds.Maximum } );
+	}
+
+	[Fact]
+	public void DefaultTimeoutBeyondTheTimerBoundIsRejected()
+	{
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				() => new Scheduler(
+						new SequentialIdGenerator( "schedule" ), _scheduleDatabase.ApplicationData,
+						SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), new FakeJobTypeRegistry( "test" ),
+						new SchedulerOptions { DefaultTimeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) },
+						TimeProvider.System ) );
+
+		Assert.Equal( "options", exception.ParamName );
+	}
 }
 
 public sealed class SqliteSchedulerTests : SchedulerTests<SqliteScheduleDatabaseFixture>,

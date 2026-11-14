@@ -36,6 +36,8 @@ namespace Pug.Scheduling
 			_jobTypeRegistry = jobTypeRegistry ?? throw new ArgumentNullException( nameof(jobTypeRegistry) );
 
 			_options = options ?? throw new ArgumentNullException( nameof(options) );
+
+			ValidateTimeoutBound( _options.DefaultTimeout, nameof(SchedulerOptions.DefaultTimeout), nameof(options) );
 		}
 
 		private static void ValidateIdentifier( string identifier )
@@ -86,6 +88,15 @@ namespace Pug.Scheduling
 
 			if( definition.Timeout < TimeSpan.Zero )
 				throw new ArgumentException( "Timeout must not be negative.", nameof(definition) );
+
+			ValidateTimeoutBound( definition.Timeout, nameof(definition.Timeout), nameof(definition) );
+		}
+
+		private static void ValidateTimeoutBound( TimeSpan timeout, string what, string parameter )
+		{
+			if( timeout > TimerBounds.Maximum )
+				throw new ArgumentException(
+						$"{what} must not exceed {TimerBounds.Maximum} (about 49.7 days).", parameter );
 		}
 
 		// Registrations that omit optional policies receive the service-level defaults.

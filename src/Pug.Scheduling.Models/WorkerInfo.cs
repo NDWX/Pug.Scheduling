@@ -71,6 +71,8 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
+		// Jobs the worker is attending (executing, heartbeating and awaiting). Handlers it detached
+		// are not counted here but in DetachedJobs.
 		[Required, DataMember( IsRequired = true )]
 		public int ActiveJobs
 		{

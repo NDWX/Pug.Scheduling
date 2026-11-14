@@ -147,6 +147,19 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
+	public async Task TimeoutBeyondTheTimerBoundIsRejectedAsBadRequest()
+	{
+		using HttpClient client = _fixture.CreateClient( Owner );
+
+		ScheduleDefinition definition = NewDefinition() with { Timeout = TimeSpan.FromDays( 60 ) };
+
+		HttpResponseMessage response =
+			await client.PostAsync( "/schedules", SchedulingApiFixture.JsonContent( definition ) );
+
+		Assert.Equal( HttpStatusCode.BadRequest, response.StatusCode );
+	}
+
+	[Fact]
 	public async Task ListingRequiresDomain()
 	{
 		using HttpClient client = _fixture.CreateClient( Owner );

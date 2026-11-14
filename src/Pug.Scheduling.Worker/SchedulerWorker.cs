@@ -159,7 +159,11 @@ namespace Pug.Scheduling.Worker
 				// wait still interrupts the wait.
 				Task stateChanged = _stateChanged.Task;
 
-				if( IsPaused || ClaimingSuspended() )
+				bool atDetachedLimit = AtDetachedLimit();
+
+				LogClaimingTransition( atDetachedLimit );
+
+				if( IsPaused || atDetachedLimit )
 				{
 					await WaitForAsync( stateChanged, Timeout.InfiniteTimeSpan, stoppingToken )
 						.ConfigureAwait( false );
@@ -208,28 +212,28 @@ namespace Pug.Scheduling.Worker
 			return job;
 		}
 
-		// Whether claiming is suspended because MaxDetachedHandlers detached handlers are still
-		// running (any detached handler when the bound is 0). Logs the suspension once, and the
-		// resumption.
-		private bool ClaimingSuspended()
+		// Whether MaxDetachedHandlers detached handlers are still running, so claiming is suspended.
+		private bool AtDetachedLimit() => Volatile.Read( ref _detachedJobs ) >= _options.MaxDetachedHandlers;
+
+		// Logs the suspension of claiming once (an Error), and its resumption.
+		private void LogClaimingTransition( bool suspended )
 		{
+			if( suspended == _claimingSuspended )
+				return;
+
+			_claimingSuspended = suspended;
+
 			int detached = Volatile.Read( ref _detachedJobs );
 
-			bool suspend = detached > 0 && detached >= _options.MaxDetachedHandlers;
-
-			if( suspend && !_claimingSuspended )
+			if( suspended )
 				_logger.LogError(
 						"Worker {Claimant}/{Worker} (job type {JobType}) stopped claiming: {Detached} detached handler(s) " +
 						"still running, at the limit of {MaxDetachedHandlers}. Claiming resumes when one ends.",
 						_options.Claimant, _worker, _jobTypeFilter, detached, _options.MaxDetachedHandlers );
-			else if( !suspend && _claimingSuspended )
+			else
 				_logger.LogInformation(
 						"Worker {Claimant}/{Worker} (job type {JobType}) resumed claiming: {Detached} detached handler(s) still running.",
 						_options.Claimant, _worker, _jobTypeFilter, detached );
-
-			_claimingSuspended = suspend;
-
-			return suspend;
 		}
 
 		// Waits until the signal completes, the delay elapses, or cancellation is requested.
@@ -269,10 +273,22 @@ namespace Pug.Scheduling.Worker
 						"Worker {Claimant}/{Worker} claimed run {Run} of schedule {Schedule} ({JobType}).",
 						_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, job.Context.JobType );
 
-				RunCancellation cancellation = new( job.Timeout, stoppingToken );
+				// A timeout no timer accepts (it may come from a remote coordinator) fails the run;
+				// it must not escape the pump.
+				if( !TimerBounds.Contains( job.Timeout ) )
+				{
+					await ReportAsync( job, InvalidTimeout( job ), stopwatch ).ConfigureAwait( false );
+
+					return;
+				}
+
+				RunCancellation cancellation = new(
+						job.Timeout, stoppingToken, exception => LogCallbackFault( job, exception ) );
 
 				Task<JobOutcome> run = StartHandler( job, cancellation.Token );
 
+				// A snapshot: a handler completing between here and Detach below is still detached,
+				// and reported as TIMED_OUT.
 				bool finished = await ExecuteAttendedAsync( job, run, cancellation ).ConfigureAwait( false );
 
 				RunReport report = ClassifyOutcome( job, run, finished, cancellation );
@@ -331,6 +347,8 @@ namespace Pug.Scheduling.Worker
 		{
 			RunReport report;
 
+			// Catch order: a timeout firing during a shutdown-initiated grace reports TIMED_OUT, the
+			// same as when the handler ends within the grace.
 			try
 			{
 				report = Completed( job, run.GetAwaiter().GetResult() );
@@ -386,6 +404,18 @@ namespace Pug.Scheduling.Worker
 						job.Context.JobType, outcome.Error );
 
 			return new RunReport( outcome.Successful ? RunResults.Succeeded : RunResults.Failed, outcome );
+		}
+
+		private RunReport InvalidTimeout( ClaimedJob job )
+		{
+			string error = $"Job timeout {job.Timeout} is outside the supported range (0 to {TimerBounds.Maximum}); " +
+							"the job was not executed.";
+
+			_logger.LogError(
+					"Worker {Claimant}/{Worker} run {Run} of schedule {Schedule} ({JobType}) not executed: {Error}",
+					_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, job.Context.JobType, error );
+
+			return new RunReport( RunResults.Failed, new JobOutcome { Successful = false, Error = error } );
 		}
 
 		private RunReport TimedOut( ClaimedJob job, string error )
@@ -605,43 +635,98 @@ namespace Pug.Scheduling.Worker
 			}
 		}
 
+		private void LogCallbackFault( ClaimedJob job, Exception exception ) =>
+			_logger.LogWarning( exception,
+								"Worker {Claimant}/{Worker} run {Run}: a cancellation callback threw while the run was being cancelled.",
+								_options.Claimant, _worker, job.Context.Run );
+
 		// What the worker reports for a run.
 		private sealed record RunReport( string Result, JobOutcome Outcome );
 
-		// A run's stop signals — its timeout, the loss of its claim, and host shutdown — linked
-		// into the one token its handler observes. Owned by the handler until it ends: a detached
+		// A run's stop signals — its timeout, the loss of its claim, and host shutdown — folded into
+		// the one token its handler observes. Owned by the handler until it ends: a detached
 		// handler may still hold the token.
+		//
+		// Cancelling runs the handler's registered callbacks synchronously, on whichever thread
+		// triggers it: the timeout's timer, the heartbeat, or the host stopping the worker. Every
+		// trigger therefore goes through Cancel, which records the reason first and then contains
+		// a throwing callback: it is logged and cannot fault that thread (the token is cancelled
+		// regardless).
 		private sealed class RunCancellation : IDisposable
 		{
-			private readonly CancellationTokenSource _timeout;
-			private readonly CancellationTokenSource _claimLost = new();
-			private readonly CancellationTokenSource _execution;
+			private readonly CancellationTokenSource _execution = new();
+			private readonly CancellationTokenSource _disposed = new();
 			private readonly CancellationToken _stopping;
+			private readonly CancellationTokenRegistration _stoppingRegistration;
+			private readonly Action<Exception> _callbackFaulted;
 
-			public RunCancellation( TimeSpan timeout, CancellationToken stoppingToken )
+			private volatile bool _timedOut;
+			private volatile bool _claimLost;
+
+			public RunCancellation( TimeSpan timeout, CancellationToken stoppingToken, Action<Exception> callbackFaulted )
 			{
-				_timeout = new CancellationTokenSource( timeout );
 				_stopping = stoppingToken;
+				_callbackFaulted = callbackFaulted;
 
-				_execution = CancellationTokenSource.CreateLinkedTokenSource(
-						stoppingToken, _timeout.Token, _claimLost.Token );
+				_stoppingRegistration = stoppingToken.Register( Cancel );
+
+				_ = CancelOnTimeoutAsync( timeout );
 			}
 
 			public CancellationToken Token => _execution.Token;
 
-			public bool TimedOut => _timeout.IsCancellationRequested;
+			public bool TimedOut => _timedOut;
 
-			public bool ClaimLost => _claimLost.IsCancellationRequested;
+			public bool ClaimLost => _claimLost;
 
 			public bool HostStopping => _stopping.IsCancellationRequested;
 
-			public void LoseClaim() => _claimLost.Cancel();
+			public void LoseClaim()
+			{
+				_claimLost = true;
+
+				Cancel();
+			}
+
+			private async Task CancelOnTimeoutAsync( TimeSpan timeout )
+			{
+				try
+				{
+					await Task.Delay( timeout, _disposed.Token ).ConfigureAwait( false );
+				}
+				catch( OperationCanceledException )
+				{
+					// The run ended first.
+					return;
+				}
+
+				_timedOut = true;
+
+				Cancel();
+			}
+
+			private void Cancel()
+			{
+				try
+				{
+					_execution.Cancel();
+				}
+				catch( ObjectDisposedException )
+				{
+					// The run ended first.
+				}
+				catch( Exception exception )
+				{
+					_callbackFaulted( exception );
+				}
+			}
 
 			public void Dispose()
 			{
+				_disposed.Cancel();
+				_stoppingRegistration.Dispose();
 				_execution.Dispose();
-				_claimLost.Dispose();
-				_timeout.Dispose();
+				_disposed.Dispose();
 			}
 		}
 	}

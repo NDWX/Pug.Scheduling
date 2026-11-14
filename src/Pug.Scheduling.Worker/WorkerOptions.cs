@@ -1,3 +1,5 @@
+using Pug.Scheduling.Abstractions;
+
 namespace Pug.Scheduling.Worker
 {
 	// Configuration of one worker group: Workers identical workers that claim under one claimant
@@ -17,28 +19,33 @@ namespace Pug.Scheduling.Worker
 		// The only job type the group's workers claim; null claims any type.
 		public string JobType { get; init; }
 
-		// How long to wait between polls when no work was claimed.
+		// How long to wait between polls when no work was claimed. Positive, and within
+		// TimerBounds.Maximum.
 		public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds( 10 );
 
 		// Claim-renewal cadence during job execution. Must be comfortably shorter than the
-		// coordinator's lease duration, or claims lapse mid-run and peers re-execute.
+		// coordinator's lease duration, or claims lapse mid-run and peers re-execute. Positive, and
+		// within TimerBounds.Maximum.
 		public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds( 30 );
 
 		// How long a stopped run's handler (timed out, claim lost, host stopping) is given to honour
-		// cancellation before the worker detaches it and moves on. Keep it below the host's shutdown
-		// timeout, or a handler ignoring cancellation on shutdown outlasts the host's wait for the
-		// worker.
-		public TimeSpan CancellationGrace { get; init; } = TimeSpan.FromSeconds( 30 );
+		// cancellation before the worker detaches it and moves on. Zero detaches immediately. Within
+		// TimerBounds.Maximum. The default (10 s) is below the host's default shutdown timeout
+		// (30 s); keep it below that, or a handler ignoring cancellation on shutdown outlasts the
+		// host's wait for the worker.
+		public TimeSpan CancellationGrace { get; init; } = TimeSpan.FromSeconds( 10 );
 
 		// How many detached handlers (see CancellationGrace) each worker tolerates: at this many it
-		// stops claiming until one ends. 0 and 1 both stop claiming while any handler is detached.
+		// stops claiming until one ends. At least 1.
 		public int MaxDetachedHandlers { get; init; } = 2;
 
 		/// <summary>
 		/// Throws <see cref="ArgumentException"/> (naming the offending property) unless
 		/// <see cref="Claimant"/> is neither blank nor contains '/', <see cref="Workers"/> is at
-		/// least 1, <see cref="JobType"/> is null or not blank, <see cref="CancellationGrace"/> is not
-		/// negative, and <see cref="MaxDetachedHandlers"/> is not negative.
+		/// least 1, <see cref="JobType"/> is null or not blank, <see cref="PollInterval"/> and
+		/// <see cref="HeartbeatInterval"/> are positive, <see cref="CancellationGrace"/> is not
+		/// negative, each of the three is within <see cref="TimerBounds.Maximum"/>, and
+		/// <see cref="MaxDetachedHandlers"/> is at least 1.
 		/// </summary>
 		public void Validate()
 		{
@@ -54,11 +61,27 @@ namespace Pug.Scheduling.Worker
 			if( JobType is not null && string.IsNullOrWhiteSpace( JobType ) )
 				throw new ArgumentException( "Worker job type must be null (any type) or not blank.", nameof(JobType) );
 
+			if( PollInterval <= TimeSpan.Zero )
+				throw new ArgumentException( "Poll interval must be positive.", nameof(PollInterval) );
+
+			if( HeartbeatInterval <= TimeSpan.Zero )
+				throw new ArgumentException( "Heartbeat interval must be positive.", nameof(HeartbeatInterval) );
+
 			if( CancellationGrace < TimeSpan.Zero )
 				throw new ArgumentException( "Cancellation grace must not be negative.", nameof(CancellationGrace) );
 
-			if( MaxDetachedHandlers < 0 )
-				throw new ArgumentException( "Maximum detached handlers must not be negative.", nameof(MaxDetachedHandlers) );
+			ValidateWithinTimerBounds( PollInterval, nameof(PollInterval) );
+			ValidateWithinTimerBounds( HeartbeatInterval, nameof(HeartbeatInterval) );
+			ValidateWithinTimerBounds( CancellationGrace, nameof(CancellationGrace) );
+
+			if( MaxDetachedHandlers < 1 )
+				throw new ArgumentException( "Maximum detached handlers must be at least 1.", nameof(MaxDetachedHandlers) );
+		}
+
+		private static void ValidateWithinTimerBounds( TimeSpan duration, string property )
+		{
+			if( duration > TimerBounds.Maximum )
+				throw new ArgumentException( $"Must not exceed {TimerBounds.Maximum}.", property );
 		}
 	}
 }

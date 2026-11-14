@@ -131,13 +131,13 @@ public class SchedulerWorkerTests
 			ClaimExpiry = DateTime.UtcNow.AddMinutes( 2 )
 		};
 
-	private static WorkerOptions FastOptions( int maxDetachedHandlers = 2 ) =>
+	private static WorkerOptions FastOptions( int maxDetachedHandlers = 2, int graceMilliseconds = 100 ) =>
 		new()
 		{
 			Claimant = "test-worker",
 			PollInterval = TimeSpan.FromMilliseconds( 20 ),
 			HeartbeatInterval = TimeSpan.FromMilliseconds( 20 ),
-			CancellationGrace = TimeSpan.FromMilliseconds( 100 ),
+			CancellationGrace = TimeSpan.FromMilliseconds( graceMilliseconds ),
 			MaxDetachedHandlers = maxDetachedHandlers
 		};
 
@@ -370,7 +370,7 @@ public class SchedulerWorkerTests
 			await coordinator.ReportOf( "hanging" ).WaitAsync( Bound );
 
 			// At the bound: many poll intervals pass without another claim.
-			await Task.Delay( TimeSpan.FromMilliseconds( 500 ) );
+			await Task.Delay( TimeSpan.FromMilliseconds( 200 ) );
 
 			Assert.Equal( 1, coordinator.Claims );
 			Assert.Equal( 1, worker.GetInfo().DetachedJobs );
@@ -402,7 +402,8 @@ public class SchedulerWorkerTests
 
 		FakeCoordinator coordinator = new( NewJob() ) { Renews = false };
 
-		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions() );
+		// A generous grace: it is never waited for, the handler honours cancellation.
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
 
 		await worker.StartAsync( CancellationToken.None );
 
@@ -433,7 +434,8 @@ public class SchedulerWorkerTests
 
 		FakeCoordinator coordinator = new( NewJob() );
 
-		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions() );
+		// A generous grace: it is never waited for, the handler honours cancellation.
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
 
 		await worker.StartAsync( CancellationToken.None );
 
@@ -445,6 +447,305 @@ public class SchedulerWorkerTests
 		Assert.True( cancelled.Task.IsCompleted );
 		Assert.Equal( 0, coordinator.Reports );
 		Assert.Equal( 1, handler.Disposals );
+	}
+
+	[Fact]
+	public async Task DetachedHandlerOfALostClaimIsNotReported()
+	{
+		TaskCompletionSource release = Signal();
+
+		DelegateJobHandler hanging = Hanging( release );
+
+		FakeCoordinator coordinator = new( NewJob() ) { Renews = false };
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( hanging ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await WaitUntilAsync( () => worker.GetInfo().DetachedJobs == 1 );
+
+			// The worker moved on (it keeps polling) without reporting.
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			Assert.Equal( 0, coordinator.Reports );
+			Assert.Equal( 1, worker.GetInfo().DetachedJobs );
+			Assert.Equal( 0, worker.GetInfo().ActiveJobs );
+		}
+		finally
+		{
+			release.TrySetResult();
+
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ShutdownDetachesAHandlerThatIgnoresCancellationAndStopReturns()
+	{
+		TaskCompletionSource started = Signal();
+		TaskCompletionSource release = Signal();
+
+		DelegateJobHandler hanging = new(
+				async ( _, _, _ ) =>
+				{
+					started.TrySetResult();
+
+					await release.Task;
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		FakeCoordinator coordinator = new( NewJob() );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( hanging ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await started.Task.WaitAsync( Bound );
+
+			// Returns after the grace, not after the handler.
+			await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+			Assert.Equal( 0, coordinator.Reports );
+			Assert.Equal( 1, worker.GetInfo().DetachedJobs );
+			Assert.Equal( 0, hanging.Disposals );
+		}
+		finally
+		{
+			release.TrySetResult();
+		}
+	}
+
+	[Fact]
+	public async Task DetachedHandlerThatEndsByThrowingIsStillReleased()
+	{
+		TaskCompletionSource release = Signal();
+
+		DelegateJobHandler hanging = new(
+				async ( _, _, _ ) =>
+				{
+					await release.Task;
+
+					throw new InvalidOperationException( "late failure" );
+				} );
+
+		FakeCoordinator coordinator = new( NewJob( timeout: TimeSpan.FromMilliseconds( 100 ) ) );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( hanging ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( 1, worker.GetInfo().DetachedJobs );
+
+			release.TrySetResult();
+
+			await WaitUntilAsync( () => worker.GetInfo().DetachedJobs == 0 );
+
+			Assert.Equal( 1, hanging.Disposals );
+			Assert.Equal( 1, coordinator.Reports );
+		}
+		finally
+		{
+			release.TrySetResult();
+
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task HandlerFinishingAfterTheClaimWasLostIsNotReported()
+	{
+		TaskCompletionSource cancelled = Signal();
+
+		// Notices the cancellation but ends normally with an outcome, within the grace.
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					try
+					{
+						await Task.Delay( Timeout.InfiniteTimeSpan, cancellationToken );
+					}
+					catch( OperationCanceledException )
+					{
+						cancelled.TrySetResult();
+					}
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		FakeCoordinator coordinator = new( NewJob() ) { Renews = false };
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await cancelled.Task.WaitAsync( Bound );
+
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			Assert.Equal( 0, coordinator.Reports );
+			Assert.Equal( 1, handler.Disposals );
+			Assert.Equal( 0, worker.GetInfo().DetachedJobs );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ThrowingCancellationCallbackDoesNotFaultTheWorker()
+	{
+		TaskCompletionSource cancelled = Signal();
+
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					using CancellationTokenRegistration registration =
+						cancellationToken.Register( () => throw new InvalidOperationException( "callback exploded" ) );
+
+					try
+					{
+						await Task.Delay( Timeout.InfiniteTimeSpan, cancellationToken );
+					}
+					finally
+					{
+						cancelled.TrySetResult();
+					}
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		FakeCoordinator coordinator = new( NewJob() ) { Renews = false };
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await cancelled.Task.WaitAsync( Bound );
+
+			// The pump survives: the abandoned run is processed and polling goes on.
+			await coordinator.ClaimsReachedAsync( 3 ).WaitAsync( Bound );
+
+			Assert.Equal( 0, coordinator.Reports );
+			Assert.Equal( 1, handler.Disposals );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ThrowingCancellationCallbackOnTimeoutStillReportsTimedOut()
+	{
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					using CancellationTokenRegistration registration =
+						cancellationToken.Register( () => throw new InvalidOperationException( "callback exploded" ) );
+
+					await Task.Delay( Timeout.InfiniteTimeSpan, cancellationToken );
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		FakeCoordinator coordinator = new( NewJob( timeout: TimeSpan.FromMilliseconds( 100 ) ) );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.TimedOut, result );
+
+			// The worker keeps polling.
+			await coordinator.ClaimsReachedAsync( coordinator.Claims + 2 ).WaitAsync( Bound );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ThrowingCancellationCallbackOnShutdownDoesNotFaultStop()
+	{
+		TaskCompletionSource started = Signal();
+
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					using CancellationTokenRegistration registration =
+						cancellationToken.Register( () => throw new InvalidOperationException( "callback exploded" ) );
+
+					started.TrySetResult();
+
+					await Task.Delay( Timeout.InfiniteTimeSpan, cancellationToken );
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		FakeCoordinator coordinator = new( NewJob() );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		await started.Task.WaitAsync( Bound );
+
+		await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		Assert.Equal( 0, coordinator.Reports );
+		Assert.Equal( 1, handler.Disposals );
+	}
+
+	[Fact]
+	public async Task JobWithOversizedTimeoutIsFailedAndWorkerContinues()
+	{
+		DelegateJobHandler never = Succeeding();
+
+		FakeCoordinator coordinator = new(
+				NewJob( timeout: TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ), run: "huge" ),
+				NewJob( run: "next" ) );
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, new PerRunRegistry( new() { ["huge"] = never, ["next"] = Succeeding() } ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, JobOutcome outcome ) = await coordinator.ReportOf( "huge" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Failed, result );
+			Assert.False( outcome.Successful );
+			Assert.Contains( "outside the supported range", outcome.Error );
+
+			( string nextResult, _ ) = await coordinator.ReportOf( "next" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, nextResult );
+			Assert.Equal( 0, never.Disposals );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
 	}
 
 	[Fact]
@@ -602,7 +903,7 @@ public class SchedulerWorkerTests
 		Assert.Equal( Environment.MachineName, options.Claimant );
 		Assert.Equal( 1, options.Workers );
 		Assert.Null( options.JobType );
-		Assert.Equal( TimeSpan.FromSeconds( 30 ), options.CancellationGrace );
+		Assert.Equal( TimeSpan.FromSeconds( 10 ), options.CancellationGrace );
 		Assert.Equal( 2, options.MaxDetachedHandlers );
 
 		options.Validate();
@@ -628,6 +929,7 @@ public class SchedulerWorkerTests
 
 	[Theory]
 	[InlineData( -1, 2, nameof(WorkerOptions.CancellationGrace) )]
+	[InlineData( 0, 0, nameof(WorkerOptions.MaxDetachedHandlers) )]
 	[InlineData( 0, -1, nameof(WorkerOptions.MaxDetachedHandlers) )]
 	public void InvalidDetachOptionsAreRejected( int graceMilliseconds, int maxDetachedHandlers, string property )
 	{
@@ -643,6 +945,42 @@ public class SchedulerWorkerTests
 		Assert.Equal( property, exception.ParamName );
 	}
 
+	private static WorkerOptions WithDuration( string property, TimeSpan value ) =>
+		property switch
+		{
+			nameof(WorkerOptions.PollInterval) => new WorkerOptions { Claimant = "host", PollInterval = value },
+			nameof(WorkerOptions.HeartbeatInterval) => new WorkerOptions { Claimant = "host", HeartbeatInterval = value },
+			nameof(WorkerOptions.CancellationGrace) => new WorkerOptions { Claimant = "host", CancellationGrace = value },
+			_ => throw new ArgumentOutOfRangeException( nameof(property) )
+		};
+
+	[Theory]
+	[InlineData( nameof(WorkerOptions.PollInterval), 0 )]
+	[InlineData( nameof(WorkerOptions.PollInterval), -1 )]
+	[InlineData( nameof(WorkerOptions.HeartbeatInterval), 0 )]
+	[InlineData( nameof(WorkerOptions.HeartbeatInterval), -1 )]
+	public void NonPositiveIntervalsAreRejected( string property, int milliseconds )
+	{
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				WithDuration( property, TimeSpan.FromMilliseconds( milliseconds ) ).Validate );
+
+		Assert.Equal( property, exception.ParamName );
+	}
+
+	[Theory]
+	[InlineData( nameof(WorkerOptions.PollInterval) )]
+	[InlineData( nameof(WorkerOptions.HeartbeatInterval) )]
+	[InlineData( nameof(WorkerOptions.CancellationGrace) )]
+	public void DurationsBeyondTheTimerBoundAreRejectedAndTheBoundIsAccepted( string property )
+	{
+		WithDuration( property, TimerBounds.Maximum ).Validate();
+
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				WithDuration( property, TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) ).Validate );
+
+		Assert.Equal( property, exception.ParamName );
+	}
+
 	[Theory]
 	[InlineData( "host", 1, null )]
 	[InlineData( "host-2.example", 4, "report" )]
@@ -652,8 +990,8 @@ public class SchedulerWorkerTests
 	}
 
 	[Fact]
-	public void ZeroGraceAndZeroDetachedHandlersAreAccepted()
+	public void ZeroGraceAndOneDetachedHandlerAreAccepted()
 	{
-		new WorkerOptions { Claimant = "host", CancellationGrace = TimeSpan.Zero, MaxDetachedHandlers = 0 }.Validate();
+		new WorkerOptions { Claimant = "host", CancellationGrace = TimeSpan.Zero, MaxDetachedHandlers = 1 }.Validate();
 	}
 }
