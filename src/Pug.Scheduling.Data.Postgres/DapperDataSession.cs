@@ -14,6 +14,8 @@ namespace Pug.Scheduling.Data.Postgres
 
 		protected override string EnabledNotPausedPredicate => "enabled and not paused";
 
+		protected override string RunRequestedPredicate => "runRequested";
+
 		// Holds the row's lock until the unit's transaction ends, so a read the unit then acts on
 		// cannot be overtaken by a concurrent writer under READ COMMITTED.
 		protected override string LockingReadClause => "for update";

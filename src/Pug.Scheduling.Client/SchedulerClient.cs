@@ -1,3 +1,4 @@
+using System.Net;
 using Pug.Effable;
 using Pug.HttpApiClient;
 using Pug.HttpApiClient.Json;
@@ -99,7 +100,24 @@ public class SchedulerClient : ApiClient, IScheduler
 
 	public Task ResumeAsync( string identifier ) => PostAsync( identifier, "resume" );
 
-	public Task RunNowAsync( string identifier ) => PostAsync( identifier, "run" );
+	public Task RunNowAsync( string identifier ) =>
+		ApiFailures.TranslateAsync(
+				async () =>
+				{
+					try
+					{
+						using HttpResponseMessage response =
+							await HttpClient.PostAsync( $"{SchedulePath( identifier )}/run", new object() )
+											.ConfigureAwait( false );
+					}
+					catch( HttpApiRequestException exception ) when( exception.ResponseStatusCode == HttpStatusCode.Conflict )
+					{
+						// The status carries no details of the run in progress.
+						throw new RunInProgressException( identifier );
+					}
+				},
+				() => new UnknownScheduleException( identifier )
+			);
 
 	private Task PostAsync( string identifier, string action ) =>
 		ApiFailures.TranslateAsync(

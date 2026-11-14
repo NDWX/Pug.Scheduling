@@ -7,8 +7,7 @@ using Pug.Scheduling.Models;
 namespace Pug.Scheduling.Abstractions
 {
 	// Management facade over the schedule store: configuration and observation only. This
-	// interface never executes jobs — run-now merely brings the next occurrence forward for the
-	// worker to claim. It is the single wire contract implemented by the in-process facade (and
+	// interface never executes jobs — run-now merely records a request for a worker to claim. It is the single wire contract implemented by the in-process facade (and
 	// any future HTTP client), so keep it the source of truth for the scheduler's capabilities.
 	//
 	// Authorization: every operation is checked against the schedule's domain. The schedule's
@@ -34,7 +33,10 @@ namespace Pug.Scheduling.Abstractions
 		Task<ScheduleInfo> GetScheduleAsync( string identifier );
 
 		// Replaces the schedule's definition wholesale, re-validating as for registration, and
-		// recomputes the next occurrence when the recurrence changed. Domain is immutable: a
+		// recomputes the next occurrence when the recurrence changed, unless a retry is pending
+		// (the retry keeps its time; the new recurrence applies once the occurrence completes). A
+		// run in progress, a pending retry and a run request are left as they are. Domain is
+		// immutable: a
 		// definition carrying a different value is rejected (the schedule's Owner is not part of
 		// the definition and can never change). Updates the schedule's LastUpdate. Throws
 		// UnknownScheduleException when the schedule does not exist.
@@ -55,9 +57,14 @@ namespace Pug.Scheduling.Abstractions
 		// does not exist.
 		Task ResumeAsync( string identifier );
 
-		// Brings the next occurrence forward to now, causing the worker to claim and execute the
-		// schedule on its next poll with trigger MANUAL. No-op when an execution is already
-		// claimed. Throws UnknownScheduleException when the schedule does not exist.
+		// Requests an immediate run: a worker claims and executes the schedule on its next poll,
+		// with trigger MANUAL, whatever its next occurrence. The request never moves the next
+		// occurrence. A manual run is not retried on failure; during a retry's backoff it
+		// accelerates the pending retry instead (same occurrence, same attempt). On completion,
+		// FIRE_ONCE and SKIP schedules coalesce an occurrence that was already due into it, while
+		// RUN_ALL keeps its backlog. Throws RunInProgressException when a run of the schedule is
+		// in progress, including a lapsed run awaiting adoption, and UnknownScheduleException
+		// when the schedule does not exist.
 		Task RunNowAsync( string identifier );
 
 		// Returns the schedule's recorded runs, most recent first, optionally bounded by start

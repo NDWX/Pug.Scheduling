@@ -1,30 +1,25 @@
 using Pug.Application.Security;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
-using Pug.Scheduling.Leases;
 using Pug.Scheduling.Models;
 using Pug.Scheduling.Tests.Infrastructure;
 
 namespace Pug.Scheduling.Tests;
 
-// The scheduler facade over real schedule and lease stores, run against each provider by the
-// subclasses below. They declare the class fixtures: two IClassFixture<T> over type parameters
-// could unify (CS0695).
-public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
+// The scheduler facade over a real schedule store, run against each provider by the subclasses
+// below, which declare the class fixture.
+public abstract class SchedulerTests<TScheduleDatabase>
 	where TScheduleDatabase : class, IScheduleDatabaseFixture
-	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
 	private const string Domain = "tenant-1";
 	private const string OwnerUser = "owner-1";
 
 	private readonly TScheduleDatabase _scheduleDatabase;
 	private readonly IScheduler _scheduler;
-	private readonly IExecutionLeaseProvider _leaseProvider;
 
-	protected SchedulerTests( TScheduleDatabase scheduleDatabase, TLeaseDatabase leaseDatabase )
+	protected SchedulerTests( TScheduleDatabase scheduleDatabase )
 	{
 		_scheduleDatabase = scheduleDatabase;
-		_leaseProvider = new DatabaseExecutionLeaseProvider( leaseDatabase.ApplicationData );
 		_scheduler = CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ) );
 	}
 
@@ -33,7 +28,6 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 				new SequentialIdGenerator( "schedule" ),
 				_scheduleDatabase.ApplicationData,
 				securityManager,
-				_leaseProvider,
 				new FakeJobTypeRegistry( "test" ),
 				new SchedulerOptions(),
 				timeProvider ?? TimeProvider.System );
@@ -172,15 +166,17 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 	}
 
 	[Fact]
-	public async Task RunNowBringsNextRunForward()
+	public async Task RunNowRaisesARequestWithoutMovingTheNextRun()
 	{
 		string identifier = await _scheduler.RegisterAsync( NewDefinition() );
+
+		DateTime? nextRun = ( await _scheduler.GetScheduleAsync( identifier ) ).State.NextRun;
 
 		await _scheduler.RunNowAsync( identifier );
 
 		ScheduleInfo schedule = await _scheduler.GetScheduleAsync( identifier );
 
-		Assert.True( Math.Abs( ( schedule.State.NextRun!.Value - DateTime.UtcNow ).TotalSeconds ) < 30 );
+		Assert.Equal( nextRun, schedule.State.NextRun );
 		Assert.True( schedule.State.RunRequested );
 	}
 
@@ -238,21 +234,21 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 	}
 }
 
-public sealed class SqliteSchedulerTests : SchedulerTests<SqliteScheduleDatabaseFixture, SqliteLeaseDatabaseFixture>,
-		IClassFixture<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteLeaseDatabaseFixture>
+public sealed class SqliteSchedulerTests : SchedulerTests<SqliteScheduleDatabaseFixture>,
+		IClassFixture<SqliteScheduleDatabaseFixture>
 {
-	public SqliteSchedulerTests( SqliteScheduleDatabaseFixture scheduleDatabase, SqliteLeaseDatabaseFixture leaseDatabase )
-		: base( scheduleDatabase, leaseDatabase )
+	public SqliteSchedulerTests( SqliteScheduleDatabaseFixture scheduleDatabase )
+		: base( scheduleDatabase )
 	{
 	}
 }
 
 [Trait( "Category", "Postgres" )]
-public sealed class PostgresSchedulerTests : SchedulerTests<PostgresScheduleDatabaseFixture, PostgresLeaseDatabaseFixture>,
-		IClassFixture<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresLeaseDatabaseFixture>
+public sealed class PostgresSchedulerTests : SchedulerTests<PostgresScheduleDatabaseFixture>,
+		IClassFixture<PostgresScheduleDatabaseFixture>
 {
-	public PostgresSchedulerTests( PostgresScheduleDatabaseFixture scheduleDatabase, PostgresLeaseDatabaseFixture leaseDatabase )
-		: base( scheduleDatabase, leaseDatabase )
+	public PostgresSchedulerTests( PostgresScheduleDatabaseFixture scheduleDatabase )
+		: base( scheduleDatabase )
 	{
 	}
 }

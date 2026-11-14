@@ -12,10 +12,9 @@ Design rationale for every major shape lives in [`docs/DECISIONS.md`](docs/DECIS
 | Package | What it is for |
 |---|---|
 | `Pug.Scheduling.Models` | Entities and wire contracts. Referenced by everything. |
-| `Pug.Scheduling.Abstractions` | `IScheduler`, `IExecutionCoordinator`, `IExecutionLeaseProvider`, `ISchedulerWorker`, `ISchedulerWorkerRegistry`, security constants. |
+| `Pug.Scheduling.Abstractions` | `IScheduler`, `IExecutionCoordinator`, `ISchedulerWorker`, `ISchedulerWorkerRegistry`, security constants. |
 | `Pug.Scheduling` | The facades: `Scheduler` (management) and `ExecutionCoordinator` (execution). |
 | `Pug.Scheduling.Data.Abstractions` · `.Data.Postgres` · `.Data.SQLite` | Schedule store contract and its Dapper implementations. |
-| `Pug.Scheduling.Leases[.Data.Abstractions/.Postgres/.SQLite]` | Execution lease arbitration in its own store. |
 | `Pug.Scheduling.JobHandler.Abstractions` | `IScheduledJobHandler`, `IScheduledJobHandlerFactory` and its registry — all a handler author references. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker` — the execution pump, one job at a time — and `WorkerOptions`. |
 | `Pug.Scheduling.Worker.DependencyInjection` | `AddSchedulingWorkers` (one call per worker group), `AddScheduledJobHandler<T>`, `AddScheduledJobHandlerFactory<T>` — the worker host's DI. |
@@ -40,22 +39,19 @@ misfire handling, retry scheduling, and next-occurrence computation all live beh
 coordinator — a worker sees none of it, and binds the same interface whether it runs in-process or
 against a remote scheduler.
 
-Exclusivity comes from `IExecutionLeaseProvider`, arbitrated in its own store. Leases are short
+Exclusivity comes from an execution lease held on the schedule's row, taken and released in the
+same transaction that records the run. Leases are short
 (2 minutes by default) and heartbeat-renewed, so a crashed worker's occurrence becomes claimable
 again: execution is **at-least-once**, and handlers should key side effects on
 `(Schedule, ScheduledFor)`.
 
 ## Hosting the scheduler
 
-The host registers the two stores, then the framework:
+The host registers the schedule store, then the framework:
 
 ```csharp
 services.AddSingleton<IApplicationData<IDataSession>>(
         new Pug.Scheduling.Data.Postgres.DapperData( scheduleConnectionString, NpgsqlFactory.Instance ) );
-
-services.AddSingleton<IExecutionLeaseProvider>(
-        provider => new DatabaseExecutionLeaseProvider(
-                new Pug.Scheduling.Leases.Data.Postgres.DapperData( leaseConnectionString, NpgsqlFactory.Instance ) ) );
 
 // ISecurityManager comes from the host's own security stack.
 
@@ -68,8 +64,8 @@ services.AddJobPayloadValidator<ReportPayloadValidator>( "report" ); // optional
 services.AddSchedulingWorkers( new WorkerOptions { Workers = 4 } );   // omit where jobs execute elsewhere
 ```
 
-Each store exposes `GetSchemaUpgradeScripts()`; run them with DbUp (or your migration tool of
-choice) before first use. The schedule and lease stores may live in different databases.
+The store exposes `GetSchemaUpgradeScripts()`; run them in the order given (schema version, then
+sequence) with DbUp or your migration tool of choice before first use.
 
 Endpoints carry their own route prefixes, so map them at the root:
 
@@ -154,4 +150,4 @@ dotnet test tests/Pug.Scheduling.Tests
 
 Tests run against real SQLite stores. The Postgres providers are build-verified here — their SQL
 differs from the tested SQLite only in DDL types and boolean predicates — so CI should exercise
-them with Testcontainers, in particular the lease arbitration and concurrent-coordinator races.
+them with Testcontainers, in particular the concurrent claim, adoption and completion races.

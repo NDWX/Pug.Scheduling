@@ -14,9 +14,8 @@ namespace Pug.Scheduling.DependencyInjection
 		/// Registers the scheduling management facade (<see cref="IScheduler"/>) and execution
 		/// coordinator (<see cref="IExecutionCoordinator"/>). The host is expected to have
 		/// already registered <see cref="IApplicationData{IDataSession}"/> for the schedule store
-		/// (a concrete provider such as the Postgres or SQLite <c>DapperData</c>),
-		/// <see cref="IExecutionLeaseProvider"/> (e.g. <c>DatabaseExecutionLeaseProvider</c> over
-		/// its own lease store), <see cref="ISecurityManager"/>, and logging
+		/// (a concrete provider such as the Postgres or SQLite <c>DapperData</c>; execution leases
+		/// live on its schedule rows), <see cref="ISecurityManager"/>, and logging
 		/// (<see cref="ILogger{TCategoryName}"/>, e.g. via <c>AddLogging()</c>). A registered
 		/// <see cref="TimeProvider"/> is used as the facades' clock; otherwise <see cref="TimeProvider.System"/>.
 		/// </summary>
@@ -38,7 +37,6 @@ namespace Pug.Scheduling.DependencyInjection
 							identifierGenerator,
 							provider.GetRequiredService<IApplicationData<IDataSession>>(),
 							provider.GetRequiredService<ISecurityManager>(),
-							provider.GetRequiredService<IExecutionLeaseProvider>(),
 							provider.GetRequiredService<IJobTypeRegistry>(),
 							options ?? new SchedulerOptions(),
 							GetTimeProvider( provider )
@@ -49,7 +47,6 @@ namespace Pug.Scheduling.DependencyInjection
 					provider => new ExecutionCoordinator(
 							identifierGenerator,
 							provider.GetRequiredService<IApplicationData<IDataSession>>(),
-							provider.GetRequiredService<IExecutionLeaseProvider>(),
 							provider.GetRequiredService<ISecurityManager>(),
 							coordinatorOptions ?? new ExecutionCoordinatorOptions(),
 							GetTimeProvider( provider ),

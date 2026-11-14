@@ -18,6 +18,8 @@ namespace Pug.Scheduling.Data.SQLite
 		// Booleans are stored as integers.
 		protected override string EnabledNotPausedPredicate => "enabled = 1 and paused = 0";
 
+		protected override string RunRequestedPredicate => "runRequested = 1";
+
 		// A write unit is BEGIN IMMEDIATE, which already holds the database write lock; SQLite has
 		// no row locks (and no 'for update').
 		protected override string LockingReadClause => string.Empty;

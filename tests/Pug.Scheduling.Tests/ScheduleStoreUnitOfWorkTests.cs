@@ -132,7 +132,8 @@ public abstract class ScheduleStoreUnitOfWorkTests<TScheduleDatabase>
 					// Widens the window between the read and the write a lost update needs.
 					await Task.Delay( 20 );
 
-					await session.RecordOccurrenceCompletionAsync( context, next, current.State.NextRun, LastRun );
+					await session.SetOccurrenceStateAsync(
+								context, new OccurrenceProgress( next, null, current.State.NextRun, LastRun, false ) );
 
 					return next;
 				},
@@ -170,7 +171,8 @@ public abstract class ScheduleStoreUnitOfWorkTests<TScheduleDatabase>
 			await Task.Run(
 						() => _database.ApplicationData.WriteAsync(
 								( session, context ) =>
-									session.RecordOccurrenceCompletionAsync( context, 5, schedule.State.NextRun, LastRun ),
+									session.SetOccurrenceStateAsync(
+											context, new OccurrenceProgress( 5, null, schedule.State.NextRun, LastRun, false ) ),
 								schedule.Identifier ) )
 					.WaitAsync( TimeSpan.FromSeconds( 5 ) );
 		}

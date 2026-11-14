@@ -58,9 +58,9 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Nullable: present only while a worker instance holds the schedule's execution claim.
-		// Maintained by the scheduler's IExecutionLeaseProvider in its own storage — composed
-		// into this model for observability, never persisted with the schedule.
+		// Nullable: present only while a run of the schedule is in progress — held by a worker, or
+		// lapsed and awaiting adoption (Expiry in the past). Stored on the schedule row and
+		// maintained only by the execution coordinator.
 		[DataMember]
 		public ExecutionLease ExecutionLease
 		{

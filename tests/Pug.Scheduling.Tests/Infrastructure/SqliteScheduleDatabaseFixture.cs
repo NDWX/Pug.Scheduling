@@ -10,8 +10,7 @@ namespace Pug.Scheduling.Tests.Infrastructure;
 
 /// <summary>
 /// Provisions a fresh, isolated SQLite database for the schedule store (migrated from the
-/// <see cref="DapperData"/> schema scripts) — separate from the lease store database, mirroring
-/// the production separation of the two.
+/// <see cref="DapperData"/> schema scripts).
 /// </summary>
 public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IAsyncLifetime
 {
@@ -46,8 +45,12 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 	{
 		UpgradeEngineBuilder builder = DeployChanges.To.SqliteDatabase( connectionString );
 
+		// Applied in the order given (schema version, then sequence): DbUp would otherwise sort by name.
+		int order = 0;
+
 		foreach( SchemaUpgradeScript schemaScript in data.GetSchemaUpgradeScripts() )
-			builder = builder.WithScript( schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script );
+			builder = builder.WithScript(
+					schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script, new SqlScriptOptions { RunGroupOrder = order++ } );
 
 		DatabaseUpgradeResult result = builder.LogToNowhere().Build().PerformUpgrade();
 

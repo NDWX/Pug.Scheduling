@@ -55,8 +55,12 @@ internal static class PostgresTestServer
 	{
 		UpgradeEngineBuilder builder = DeployChanges.To.PostgresqlDatabase( connectionString );
 
+		// Applied in the order given (schema version, then sequence): DbUp would otherwise sort by name.
+		int order = 0;
+
 		foreach( SchemaUpgradeScript schemaScript in schemaScripts )
-			builder = builder.WithScript( schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script );
+			builder = builder.WithScript(
+					schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script, new SqlScriptOptions { RunGroupOrder = order++ } );
 
 		DatabaseUpgradeResult result = builder.LogToNowhere().Build().PerformUpgrade();
 

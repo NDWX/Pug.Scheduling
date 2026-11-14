@@ -9,23 +9,22 @@ namespace Pug.Scheduling
 {
 	// Management facade over the schedule store: configuration and observation only — never
 	// execution. Enforces validation, service-level defaults, and authorization (owner rule
-	// before role-based ACLs); composes ExecutionLease from the lease provider at read time.
+	// before role-based ACLs).
 	public class Scheduler : SchedulerBase, IScheduler
 	{
 		// Every schedule-store unit is a UnitsOfWork read or write of its own, never part of a
-		// caller's transaction. Each is a single statement, except a delete's two writes (run
-		// history, then schedule); no write unit acts on a read made in the same unit (the existing
-		// schedule is read in a unit of its own, D22).
+		// caller's transaction. Authorization is decided on a read of the schedule (its owner and
+		// domain never change); a write that depends on the schedule's state — run-now, a
+		// definition update, a delete — locks the row in its own unit and decides on what it locked
+		// (InLockedUnitAsync), the coordinator's lock-decide-write shape.
 
 		private readonly IdentifierGenerator _identifierGenerator;
-		private readonly IExecutionLeaseProvider _leaseProvider;
 		private readonly IJobTypeRegistry _jobTypeRegistry;
 		private readonly SchedulerOptions _options;
 
 		public Scheduler( IdentifierGenerator identifierGenerator,
 						IApplicationData<IDataSession> applicationDataProvider,
 						ISecurityManager securityManager,
-						IExecutionLeaseProvider leaseProvider,
 						IJobTypeRegistry jobTypeRegistry,
 						SchedulerOptions options,
 						TimeProvider timeProvider )
@@ -33,8 +32,6 @@ namespace Pug.Scheduling
 		{
 			_identifierGenerator = identifierGenerator ??
 									throw new ArgumentNullException( nameof(identifierGenerator) );
-
-			_leaseProvider = leaseProvider ?? throw new ArgumentNullException( nameof(leaseProvider) );
 
 			_jobTypeRegistry = jobTypeRegistry ?? throw new ArgumentNullException( nameof(jobTypeRegistry) );
 
@@ -129,11 +126,20 @@ namespace Pug.Scheduling
 			return schedule;
 		}
 
-		private async Task<ScheduleInfo> ComposeLeaseAsync( ScheduleInfo schedule ) =>
-			schedule with
-			{
-				ExecutionLease = await _leaseProvider.GetAsync( schedule.Identifier ).ConfigureAwait( false )
-			};
+		// A write unit that locks the schedule row and applies write to what it locked. The
+		// schedule may have been deleted since it was authorized: UnknownScheduleException then.
+		private Task InLockedUnitAsync( string identifier, Func<IDataSession, ScheduleInfo, Task> write ) =>
+			ApplicationDataProvider.WriteAsync(
+					async ( session, context ) =>
+					{
+						ScheduleInfo locked =
+							await session.GetScheduleAsync( context.identifier, lockRow: true ).ConfigureAwait( false ) ??
+							throw new UnknownScheduleException( context.identifier );
+
+						await context.write( session, locked ).ConfigureAwait( false );
+					},
+					context: new { identifier, write }
+				);
 
 		public async Task<string> RegisterAsync( ScheduleDefinition definition, Reference owner = null )
 		{
@@ -190,18 +196,10 @@ namespace Pug.Scheduling
 				await CheckAuthorizationAsync( SecurityOperations.List, ResourceQualifiers.AnySchedule( domain ) )
 					.ConfigureAwait( false );
 
-			IEnumerable<ScheduleInfo> schedules =
-				await ApplicationDataProvider.ReadAsync(
-							( session, context ) => session.GetSchedulesAsync( context.domain, context.owner, context.jobType ),
-							context: new { domain, owner, jobType }
-						).ConfigureAwait( false );
-
-			List<ScheduleInfo> composed = new();
-
-			foreach( ScheduleInfo schedule in schedules )
-				composed.Add( await ComposeLeaseAsync( schedule ).ConfigureAwait( false ) );
-
-			return composed;
+			return await ApplicationDataProvider.ReadAsync(
+						( session, context ) => session.GetSchedulesAsync( context.domain, context.owner, context.jobType ),
+						context: new { domain, owner, jobType }
+					).ConfigureAwait( false );
 		}
 
 		public async Task<ScheduleInfo> GetScheduleAsync( string identifier )
@@ -212,7 +210,7 @@ namespace Pug.Scheduling
 
 			await CheckScheduleAuthorizationAsync( SecurityOperations.GetInfo, schedule ).ConfigureAwait( false );
 
-			return await ComposeLeaseAsync( schedule ).ConfigureAwait( false );
+			return schedule;
 		}
 
 		public async Task UpdateDefinitionAsync( string identifier, ScheduleDefinition definition )
@@ -234,17 +232,14 @@ namespace Pug.Scheduling
 			if( definition.Domain != existing.Definition.Domain )
 				throw new ArgumentException( "Schedule domain cannot be changed.", nameof(definition) );
 
-			// A changed recurrence restarts occurrence computation from now; otherwise the
-			// schedule keeps its current next occurrence.
-			DateTime? nextRun = definition.Recurrence == existing.Definition.Recurrence
-									? existing.State.NextRun
-									: RecurrenceCalculator.GetNextOccurrence( definition.Recurrence, UtcNow );
-
-			await ApplicationDataProvider.WriteAsync(
-						( session, context ) =>
-							session.UpdateDefinitionAsync(
-									context.identifier, context.definition, context.nextRun, context.lastUpdate ),
-						context: new { identifier, definition, nextRun, lastUpdate = CreateActionContext() }
+			// The next occurrence is decided on the locked row, so a completion committed since the
+			// read above is never reverted. A run in progress, a pending retry and a run request are
+			// left as they are.
+			await InLockedUnitAsync(
+						identifier,
+						( session, locked ) => session.UpdateDefinitionAsync(
+								identifier, definition, DefinitionRules.NextRunAfterUpdate( locked, definition, UtcNow ),
+								CreateActionContext() )
 					).ConfigureAwait( false );
 		}
 
@@ -256,10 +251,12 @@ namespace Pug.Scheduling
 
 			await CheckScheduleAuthorizationAsync( SecurityOperations.Delete, existing ).ConfigureAwait( false );
 
-			await ApplicationDataProvider.WriteAsync(
-						( session, context ) => session.DeleteAsync( context.identifier ),
-						context: new { identifier }
-					).ConfigureAwait( false );
+			// Locking the schedule first takes its row before its runs, the order every coordinator
+			// transition takes them in (Postgres would otherwise deadlock a delete against a
+			// completion). A run in progress is not interrupted: its worker's next renewal fails, and
+			// its completion is refused as an unknown run.
+			await InLockedUnitAsync( identifier, ( session, _ ) => session.DeleteAsync( identifier ) )
+				.ConfigureAwait( false );
 		}
 
 		public Task PauseAsync( string identifier ) => SetPausedAsync( identifier, true, SecurityOperations.Pause );
@@ -290,11 +287,19 @@ namespace Pug.Scheduling
 
 			await CheckScheduleAuthorizationAsync( SecurityOperations.RunNow, existing ).ConfigureAwait( false );
 
-			// Raises the RunRequested marker with the moved occurrence, so the coordinator
-			// classifies (and records) the resulting run as MANUAL.
-			await ApplicationDataProvider.WriteAsync(
-						( session, context ) => session.RequestRunAsync( context.identifier, context.requestedTime ),
-						context: new { identifier, requestedTime = UtcNow }
+			// Raises the RunRequested marker, which the coordinator honors with a MANUAL run. A run
+			// in progress, live or lapsed, refuses the request: the next occurrence never moves.
+			await InLockedUnitAsync(
+						identifier,
+						( session, locked ) =>
+						{
+							ExecutionLease lease = locked.ExecutionLease;
+
+							if( lease is not null )
+								throw new RunInProgressException( identifier, lease.Run, lease.ClaimedBy, lease.Expiry );
+
+							return session.SetRunRequestedAsync( identifier, true );
+						}
 					).ConfigureAwait( false );
 		}
 

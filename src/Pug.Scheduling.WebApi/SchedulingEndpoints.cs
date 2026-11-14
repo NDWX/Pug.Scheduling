@@ -110,12 +110,13 @@ public static class SchedulingEndpoints
 			.WithTags( "Schedules" )
 			.WithSummary( "Request immediate execution of a schedule" )
 #endif
-			// Accepted, not Ok: the request only brings the next occurrence forward — execution
-			// happens when a worker next claims the schedule.
+			// Accepted, not Ok: the request is only recorded — execution happens when a worker
+			// next claims the schedule. Conflict: a run of the schedule is in progress.
 			.Produces( StatusCodes.Status202Accepted )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
-			.Produces( StatusCodes.Status404NotFound );
+			.Produces( StatusCodes.Status404NotFound )
+			.Produces( StatusCodes.Status409Conflict );
 
 		routes.MapPut( "schedules/{identifier}", UpdateScheduleDefinition )
 			.RequireAuthorization()
@@ -408,6 +409,11 @@ public static class SchedulingEndpoints
 		catch( UnknownScheduleException )
 		{
 			return Results.NotFound();
+		}
+		catch( RunInProgressException )
+		{
+			// Refused, not queued: nothing was recorded.
+			return Results.Conflict();
 		}
 	}
 }

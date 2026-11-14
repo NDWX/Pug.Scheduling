@@ -6,8 +6,8 @@ using static System.String;
 
 namespace Pug.Scheduling.Data.Postgres
 {
-	// The schedule store: schedule + run-history tables. Carries no lease columns — execution
-	// leases live in the lease provider's own store. Durations are stored as whole seconds.
+	// The schedule store: schedule + run-history tables. The execution lease of a schedule's active
+	// run lives on the schedule row (schema v3). Durations are stored as whole seconds.
 	public class DapperData : ApplicationData<IDataSession>
 	{
 		public DapperData( string location, DbProviderFactory dataProvider ) : base( location, dataProvider )
@@ -93,6 +93,62 @@ namespace Pug.Scheduling.Data.Postgres
 									"Schedule table job-type due index — run claimant", Empty,
 									@"alter table scheduleRun add column claimedBy character varying;",
 									@"alter table scheduleRun drop column claimedBy;"
+								)
+						}
+					),
+				new SchemaVersion(
+						3, new[]
+						{
+							// The execution lease moves onto the schedule row (it had its own store),
+							// with the retried occurrence; the due indexes now exclude schedules with
+							// a run in progress. leaseExpiry is in no index, so a heartbeat is a HOT
+							// update; the fill factor leaves the page room for one.
+							new UpgradeScript(
+									"Schedule table v3 execution state", Empty,
+									@"alter table schedule
+												add column occurrence timestamp with time zone,
+												add column activeRun character varying,
+												add column holder character varying,
+												add column leaseExpiry timestamp with time zone;
+											alter table schedule set (fillfactor = 90);
+											drop index ixScheduleDue;
+											drop index ixScheduleJobTypeDue;
+											create index ixScheduleDue on schedule(nextRun)
+												where enabled and not paused and activeRun is null;
+											create index ixScheduleJobTypeDue on schedule(jobType, nextRun)
+												where enabled and not paused and activeRun is null;
+											create index ixScheduleRequested on schedule(identifier)
+												where enabled and not paused and activeRun is null and runRequested;
+											create index ixScheduleActive on schedule(activeRun) where activeRun is not null;",
+									@"drop index ixScheduleActive;
+											drop index ixScheduleRequested;
+											drop index ixScheduleJobTypeDue;
+											drop index ixScheduleDue;
+											create index ixScheduleDue on schedule(nextRun) where enabled and not paused;
+											create index ixScheduleJobTypeDue on schedule(jobType, nextRun) where enabled and not paused;
+											alter table schedule reset (fillfactor);
+											alter table schedule
+												drop column leaseExpiry,
+												drop column holder,
+												drop column activeRun,
+												drop column occurrence;"
+								),
+							// A pending retry keeps the occurrence of its latest run. The latest
+							// unfinished run becomes the active run, lapsed (expiry at the epoch),
+							// so the next claim adopts it; its run request, raised during the run,
+							// is taken as satisfied by it.
+							new UpgradeScript(
+									"Schedule table v3 execution state backfill", Empty,
+									@"update schedule set occurrence = latest.scheduledFor
+											from (select distinct on (schedule) schedule, scheduledFor from scheduleRun
+												order by schedule, started desc) latest
+											where latest.schedule = schedule.identifier and schedule.attempt > 0;
+											update schedule set activeRun = unfinished.identifier, holder = unfinished.claimedBy,
+												leaseExpiry = 'epoch', runRequested = false
+											from (select distinct on (schedule) schedule, identifier, claimedBy from scheduleRun
+												where finished is null order by schedule, started desc) unfinished
+											where unfinished.schedule = schedule.identifier;",
+									Empty
 								)
 						}
 					)

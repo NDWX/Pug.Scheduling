@@ -130,8 +130,10 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// The lease holder ("{claimant}/{worker}") the run is recorded as executing under; a
-		// completion is accepted only from it. Null for runs recorded before this was tracked.
+		// The worker ("{claimant}/{worker}") that last claimed the run: set when the run starts and
+		// updated when a peer adopts it. An audit record only: the authority over who may renew
+		// or complete the run is the schedule's ExecutionLease. Null for runs recorded before this
+		// was tracked.
 		[DataMember]
 		public string ClaimedBy
 		{

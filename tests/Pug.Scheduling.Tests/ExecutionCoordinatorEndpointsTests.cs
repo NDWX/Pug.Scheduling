@@ -307,7 +307,7 @@ public class ExecutionCoordinatorEndpointsTests : IClassFixture<SchedulingApiFix
 		Assert.True( run.Outcome.Successful );
 		Assert.NotNull( run.Finished );
 
-		// The claim was released and the schedule advanced to its next occurrence.
+		// The claim was released; a manual run leaves the schedule's next occurrence alone.
 		ScheduleInfo schedule = await SchedulingApiFixture.ReadAsync<ScheduleInfo>(
 				await ownerClient.GetAsync( $"/schedules/{identifier}" ) );
 

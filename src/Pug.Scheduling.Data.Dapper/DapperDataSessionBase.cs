@@ -8,8 +8,8 @@ using Pug.Scheduling.Models;
 namespace Pug.Scheduling.Data.Dapper
 {
 	// The schedule store's SQL and row mapping, shared by every Dapper provider. A provider
-	// subclasses it with its dialect: the enabled-and-not-paused predicate, the clause that
-	// locks a row read, and how stored timestamps are read back. Everything else - statements,
+	// subclasses it with its dialect: the boolean predicates (written as in its partial indexes),
+	// the clause that locks a row read, and how stored timestamps are read back. Everything else - statements,
 	// parameters, the flat row shape and its composition into ScheduleInfo - is written once
 	// here. The schema scripts stay with each provider's DapperData.
 	//
@@ -32,6 +32,10 @@ namespace Pug.Scheduling.Data.Dapper
 		// Predicate on the schedule table selecting enabled, unpaused schedules. Written exactly as
 		// in the provider's partial due indexes, so the planner can match them.
 		protected abstract string EnabledNotPausedPredicate { get; }
+
+		// Predicate on the schedule table selecting schedules with a run requested, written as in
+		// the provider's partial request index.
+		protected abstract string RunRequestedPredicate { get; }
 
 		// Appended to a row read that must hold the row's write lock until the unit ends, or empty
 		// when the provider's write unit already serializes writers (SQLite's BEGIN IMMEDIATE).
@@ -84,16 +88,20 @@ namespace Pug.Scheduling.Data.Dapper
 			public DateTime? nextRun { get; set; }
 			public bool runRequested { get; set; }
 			public int attempt { get; set; }
+			public DateTime? occurrence { get; set; }
 			public RunSummary? lastRun { get; set; }
 			public ActionContext<Reference> registration { get; set; } = null!;
 			public ActionContext<Reference>? lastUpdate { get; set; }
+			public string? activeRun { get; set; }
+			public string? holder { get; set; }
+			public DateTime? leaseExpiry { get; set; }
 		}
 
 		private const string ScheduleColumns =
 			@"identifier, domain, ownerType, owner, name, jobType, payload, cronExpression, intervalSeconds,
 				timeZone, notBefore, notAfter, misfireHandling, misfireThresholdSeconds, maxAttempts,
-				retryBackoffSeconds, timeoutSeconds, enabled, paused, nextRun, runRequested, attempt, lastRun,
-				registration, lastUpdate";
+				retryBackoffSeconds, timeoutSeconds, enabled, paused, nextRun, runRequested, attempt, occurrence,
+				lastRun, registration, lastUpdate, activeRun, holder, leaseExpiry";
 
 		private const string RunColumns =
 			@"identifier, schedule, domain, scheduledFor, started, finished, attempt,
@@ -139,8 +147,17 @@ namespace Pug.Scheduling.Data.Dapper
 					NextRun = ReadTimestamp( row.nextRun ),
 					RunRequested = row.runRequested,
 					Attempt = row.attempt,
+					Occurrence = ReadTimestamp( row.occurrence ),
 					LastRun = row.lastRun
 				},
+				ExecutionLease = row.activeRun is null
+									? null
+									: new ExecutionLease
+									{
+										Run = row.activeRun,
+										ClaimedBy = row.holder!,
+										Expiry = ReadTimestamp( row.leaseExpiry ) ?? DateTime.MinValue
+									},
 				Registration = row.registration,
 				LastUpdate = row.lastUpdate
 			};
@@ -149,7 +166,7 @@ namespace Pug.Scheduling.Data.Dapper
 		private static long? IntervalSeconds( Recurrence recurrence ) =>
 			recurrence.Interval is null ? null : (long)recurrence.Interval.Value.TotalSeconds;
 
-		// == Management operations ==
+		// == Schedules ==
 
 		public Task InsertAsync( ScheduleInfo schedule )
 		{
@@ -158,7 +175,8 @@ namespace Pug.Scheduling.Data.Dapper
 						values(@identifier, @domain, @ownerType, @owner, @name, @jobType, @payload, @cronExpression,
 							@intervalSeconds, @timeZone, @notBefore, @notAfter, @misfireHandling,
 							@misfireThresholdSeconds, @maxAttempts, @retryBackoffSeconds, @timeoutSeconds,
-							@enabled, @paused, @nextRun, @runRequested, @attempt, @lastRun, @registration, @lastUpdate);",
+							@enabled, @paused, @nextRun, @runRequested, @attempt, @occurrence, @lastRun, @registration,
+							@lastUpdate, @activeRun, @holder, @leaseExpiry);",
 					new
 					{
 						identifier = schedule.Identifier,
@@ -183,9 +201,13 @@ namespace Pug.Scheduling.Data.Dapper
 						nextRun = schedule.State.NextRun,
 						runRequested = schedule.State.RunRequested,
 						attempt = schedule.State.Attempt,
+						occurrence = schedule.State.Occurrence,
 						lastRun = schedule.State.LastRun,
 						registration = schedule.Registration,
-						lastUpdate = schedule.LastUpdate
+						lastUpdate = schedule.LastUpdate,
+						activeRun = schedule.ExecutionLease?.Run,
+						holder = schedule.ExecutionLease?.ClaimedBy,
+						leaseExpiry = schedule.ExecutionLease?.Expiry
 					}
 				);
 		}
@@ -195,6 +217,16 @@ namespace Pug.Scheduling.Data.Dapper
 			ScheduleRow? row = await Connection.QueryFirstOrDefaultAsync<ScheduleRow?>(
 									$"select {ScheduleColumns} from schedule where identifier = @identifier{LockClause( lockRow )};",
 									new { identifier }
+								).ConfigureAwait( false );
+
+			return row is null ? null : Compose( row );
+		}
+
+		public async Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, bool lockRow = false )
+		{
+			ScheduleRow? row = await Connection.QueryFirstOrDefaultAsync<ScheduleRow?>(
+									$"select {ScheduleColumns} from schedule where activeRun = @run{LockClause( lockRow )};",
+									new { run }
 								).ConfigureAwait( false );
 
 			return row is null ? null : Compose( row );
@@ -217,6 +249,50 @@ namespace Pug.Scheduling.Data.Dapper
 												).ConfigureAwait( false );
 
 			return rows.Select( Compose ).ToList();
+		}
+
+		public async Task<IEnumerable<string>> GetDueCandidatesAsync( DateTime now, string holder, string? jobType,
+																	int maximumSchedules )
+		{
+			// Mirrors OccurrenceState.Classify, coarsely: an idle schedule with a run requested or
+			// its next occurrence elapsed, or one whose active run's lease lapsed or is the caller's
+			// own (restart takeover). One branch per case, each written to match a partial index and
+			// bounded on its own, so a large backlog is read in index order and cut at the limit. The
+			// three cases or-ed in one statement are a full scan on SQLite, and on Postgres a bitmap
+			// scan that reads and sorts every due row. A schedule both requested and elapsed comes
+			// from two branches, hence 'union'.
+			//
+			// The job-type filter is appended rather than written '@jobType is null or …': a null
+			// parameter carries no type, which Npgsql rejects, and the unfiltered read keeps the
+			// plain due-index plans.
+			string candidates = "select identifier, runRequested, nextRun from schedule where " +
+								EnabledNotPausedPredicate +
+								( jobType is null ? string.Empty : " and jobType = @jobType" );
+
+			IEnumerable<string> identifiers = await Connection.QueryAsync<string>(
+													$@"select identifier from (
+															select * from (
+																{candidates} and activeRun is null and {RunRequestedPredicate}
+																limit @maximumSchedules
+															) requested
+															union
+															select * from (
+																{candidates} and activeRun is null and nextRun <= @now
+																order by nextRun limit @maximumSchedules
+															) due
+															union
+															select * from (
+																{candidates} and activeRun is not null
+																	and (leaseExpiry <= @now or holder = @holder)
+																order by nextRun limit @maximumSchedules
+															) active
+														) candidates
+														order by runRequested desc, coalesce(nextRun, @now), identifier
+														limit @maximumSchedules;",
+													new { now, holder, jobType, maximumSchedules }
+												).ConfigureAwait( false );
+
+			return identifiers.ToList();
 		}
 
 		public Task UpdateDefinitionAsync( string schedule, ScheduleDefinition definition, DateTime? nextRun,
@@ -253,6 +329,49 @@ namespace Pug.Scheduling.Data.Dapper
 				);
 		}
 
+		public Task SetPausedAsync( string schedule, bool paused )
+		{
+			return Connection.ExecuteAsync(
+					"update schedule set paused = @paused where identifier = @schedule;",
+					new { schedule, paused }
+				);
+		}
+
+		public Task SetRunRequestedAsync( string schedule, bool requested )
+		{
+			return Connection.ExecuteAsync(
+					"update schedule set runRequested = @requested where identifier = @schedule;",
+					new { schedule, requested }
+				);
+		}
+
+		public Task SetExecutionAsync( string schedule, ExecutionLease? lease )
+		{
+			return Connection.ExecuteAsync(
+					@"update schedule set activeRun = @activeRun, holder = @holder, leaseExpiry = @leaseExpiry
+						where identifier = @schedule;",
+					new { schedule, activeRun = lease?.Run, holder = lease?.ClaimedBy, leaseExpiry = lease?.Expiry }
+				);
+		}
+
+		public Task SetOccurrenceStateAsync( string schedule, OccurrenceProgress progress )
+		{
+			return Connection.ExecuteAsync(
+					@"update schedule set attempt = @attempt, occurrence = @occurrence, nextRun = @nextRun,
+							lastRun = @lastRun, runRequested = @runRequested
+						where identifier = @schedule;",
+					new
+					{
+						schedule,
+						attempt = progress.Attempt,
+						occurrence = progress.Occurrence,
+						nextRun = progress.NextRun,
+						lastRun = progress.LastRun,
+						runRequested = progress.RunRequested
+					}
+				);
+		}
+
 		public async Task DeleteAsync( string schedule )
 		{
 			// Run history goes with the schedule; explicit deletes rather than relying on
@@ -266,59 +385,7 @@ namespace Pug.Scheduling.Data.Dapper
 					.ConfigureAwait( false );
 		}
 
-		public Task SetPausedAsync( string schedule, bool paused )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set paused = @paused where identifier = @schedule;",
-					new { schedule, paused }
-				);
-		}
-
-		public Task UpdateNextRunAsync( string schedule, DateTime? nextRun )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set nextRun = @nextRun, runRequested = @runRequested where identifier = @schedule;",
-					new { schedule, nextRun, runRequested = false }
-				);
-		}
-
-		public Task RequestRunAsync( string schedule, DateTime requestedTime )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set nextRun = @requestedTime, runRequested = @runRequested where identifier = @schedule;",
-					new { schedule, requestedTime, runRequested = true }
-				);
-		}
-
-		public Task ClearRunRequestAsync( string schedule )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set runRequested = @runRequested where identifier = @schedule;",
-					new { schedule, runRequested = false }
-				);
-		}
-
-		// == Execution operations ==
-
-		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules )
-		{
-			// Two statements rather than '@jobType is null or jobType = @jobType': a null
-			// parameter carries no type, which Npgsql rejects, and the unfiltered read keeps the
-			// plain due-index plan.
-			string jobTypeFilter = jobType is null ? string.Empty : "and jobType = @jobType";
-
-			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
-													$@"select {ScheduleColumns} from schedule
-														where {EnabledNotPausedPredicate}
-															{jobTypeFilter}
-															and nextRun is not null and nextRun <= @dueBy
-														order by nextRun
-														limit @maximumSchedules;",
-													new { dueBy, jobType, maximumSchedules }
-												).ConfigureAwait( false );
-
-			return rows.Select( Compose ).ToList();
-		}
+		// == Runs ==
 
 		public Task InsertRunAsync( ScheduleRun run )
 		{
@@ -355,52 +422,6 @@ namespace Pug.Scheduling.Data.Dapper
 				);
 		}
 
-		public async Task<ScheduleRun?> GetLatestRunAsync( string schedule )
-		{
-			return ReadRun(
-					await Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
-									$@"select {RunColumns} from scheduleRun where schedule = @schedule
-										order by started desc limit 1;",
-									new { schedule }
-								)
-								.ConfigureAwait( false )
-				);
-		}
-
-		public async Task<bool> ClaimRunAsync( string run, string claimedBy )
-		{
-			int updated = await Connection.ExecuteAsync(
-									"update scheduleRun set claimedBy = @claimedBy where identifier = @run and finished is null;",
-									new { run, claimedBy }
-								).ConfigureAwait( false );
-
-			return updated > 0;
-		}
-
-		public async Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result,
-												JobOutcome? outcome )
-		{
-			int updated = await Connection.ExecuteAsync(
-									@"update scheduleRun set finished = @finished, result = @result, outcome = @outcome
-										where identifier = @run and finished is null
-											and (claimedBy = @claimedBy or claimedBy is null);",
-									new { run, claimedBy, finished, result, outcome }
-								).ConfigureAwait( false );
-
-			return updated > 0;
-		}
-
-		public Task RecordOccurrenceCompletionAsync( string schedule, int attempt, DateTime? nextRun,
-													RunSummary lastRun )
-		{
-			return Connection.ExecuteAsync(
-					@"update schedule set attempt = @attempt, nextRun = @nextRun, lastRun = @lastRun,
-							runRequested = @runRequested
-						where identifier = @schedule;",
-					new { schedule, attempt, nextRun, lastRun, runRequested = false }
-				);
-		}
-
 		public async Task<IEnumerable<ScheduleRun>> GetRunsAsync( string schedule, DateTime? from = null,
 																DateTime? to = null )
 		{
@@ -418,6 +439,22 @@ namespace Pug.Scheduling.Data.Dapper
 												).ConfigureAwait( false );
 
 			return runs.Select( run => ReadRun( run )! ).ToList();
+		}
+
+		public Task FinishRunAsync( string run, DateTime finished, string result, JobOutcome? outcome )
+		{
+			return Connection.ExecuteAsync(
+					"update scheduleRun set finished = @finished, result = @result, outcome = @outcome where identifier = @run;",
+					new { run, finished, result, outcome }
+				);
+		}
+
+		public Task SetRunClaimantAsync( string run, string claimedBy )
+		{
+			return Connection.ExecuteAsync(
+					"update scheduleRun set claimedBy = @claimedBy where identifier = @run;",
+					new { run, claimedBy }
+				);
 		}
 	}
 }

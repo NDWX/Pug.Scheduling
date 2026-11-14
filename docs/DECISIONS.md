@@ -462,6 +462,15 @@ Trade-offs of leaving Serializable:
   `TransactionScope`. A host that wrapped `RegisterAsync` in a transaction of its own no longer has
   the registration enlisted in it (Postgres; SQLite never enlisted).
 
+## D23 — pending (coordinator redesign #10, sub-phase B)
+
+Implemented in sub-phase B, to be written up in sub-phase E: the execution lease moves onto the
+schedule row (schema v3: `occurrence`, `activeRun`, `holder`, `leaseExpiry`, backfilled from v2
+runs); every transition locks the row, decides in C# (`OccurrenceState`, `CompletionRules`,
+`DefinitionRules`) and writes by identifier; `Pug.Scheduling.Leases*` and `IExecutionLeaseProvider`
+are deleted; run-now during a run is refused with `RunInProgressException` (409). Supersedes D6,
+D21 and parts of D9, D10, D16 and D22 once written up.
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**

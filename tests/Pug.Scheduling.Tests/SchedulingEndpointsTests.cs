@@ -322,13 +322,33 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 
 		HttpResponseMessage response = await client.PostAsync( $"/schedules/{identifier}/run", null );
 
-		// Accepted, not Ok: the occurrence is only brought forward for a worker to claim.
+		// Accepted, not Ok: the request is only recorded for a worker to claim.
 		Assert.Equal( HttpStatusCode.Accepted, response.StatusCode );
 
 		ScheduleInfo schedule =
 			await SchedulingApiFixture.ReadAsync<ScheduleInfo>( await client.GetAsync( $"/schedules/{identifier}" ) );
 
 		Assert.True( schedule.State.RunRequested );
+	}
+
+	[Fact]
+	public async Task RunNowDuringARunIsAConflictAndRecordsNothing()
+	{
+		string identifier = await RegisterAsync( Owner );
+
+		await _fixture.MarkRunInProgressAsync( identifier );
+
+		using HttpClient client = _fixture.CreateClient( Owner );
+
+		HttpResponseMessage response = await client.PostAsync( $"/schedules/{identifier}/run", null );
+
+		Assert.Equal( HttpStatusCode.Conflict, response.StatusCode );
+
+		ScheduleInfo schedule =
+			await SchedulingApiFixture.ReadAsync<ScheduleInfo>( await client.GetAsync( $"/schedules/{identifier}" ) );
+
+		Assert.False( schedule.State.RunRequested );
+		Assert.Equal( "elsewhere/1", schedule.ExecutionLease.ClaimedBy );
 	}
 
 	[Fact]
