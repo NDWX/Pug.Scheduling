@@ -20,16 +20,16 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
 
 | Project | Role |
 |---|---|
-| `Pug.Scheduling.Models` | `WorkerInfo { Claimant, Worker, JobType, Paused, LastPoll, ActiveJobs }`, `ScheduleInfo { Identifier, Definition, Owner, State, ExecutionLease { Run, ClaimedBy, Expiry }, Registration/LastUpdate : ActionContext<Reference> }` (`State.Occurrence` = the retried occurrence while `Attempt > 0`), `ScheduleRun` (embeds `Outcome : JobOutcome`, keeps worker-classification `Result`), `ScheduledJobContext`, `ClaimedJob`, string-constant classes (`RunTriggers`, `RunResults`, `MisfireHandlings`). |
+| `Pug.Scheduling.Models` | `WorkerInfo { Claimant, Worker, JobType, Paused, LastPoll, ActiveJobs, DetachedJobs }`, `ScheduleInfo { Identifier, Definition, Owner, State, ExecutionLease { Run, ClaimedBy, Expiry }, Registration/LastUpdate : ActionContext<Reference> }` (`State.Occurrence` = the retried occurrence while `Attempt > 0`), `ScheduleRun` (embeds `Outcome : JobOutcome`, keeps worker-classification `Result`), `ScheduledJobContext`, `ClaimedJob`, string-constant classes (`RunTriggers`, `RunResults`, `MisfireHandlings`). |
 | `Pug.Scheduling.Abstractions` | `IScheduler` (config only), `IExecutionCoordinator` (workers' ONLY surface), `RunInProgressException` (run-now refused, 409), `ISchedulerWorker` (one worker) / `ISchedulerWorkerRegistry` (the host's workers by number), `IJobPayloadValidator`, `IJobTypeRegistry`, `IdentifierGenerator`, options records, security constants (in Abstractions by user decision). |
 | `Pug.Scheduling.JobHandler.Abstractions` | `IScheduledJobHandler` (receives the timeout), `IScheduledJobHandlerFactory` (takes the context), `IScheduledJobHandlerFactoryRegistry` (null when none). Multi-target, depends on Models only. |
 | `Pug.Scheduling` | `Scheduler` facade (validation, defaults, owner-rule-then-ACL authz), `ExecutionCoordinator` (claim/adopt/skip/renew/complete, one short method per transition and one `InUnitAsync` helper), `RecurrenceCalculator` (Cronos; `GetFirstOccurrence` for registration/recurrence change — an interval's `NotBefore` anchors its grid; `GetNextOccurrence( r, previous, after )` keeps the interval grid phase). **Every rule is a small pure function here**, unit-tested without a database: `OccurrenceState.Classify` (adopt > MANUAL > RETRY > MISFIRE/SKIP/SCHEDULE) and `ScheduledFor`, `CompletionRules.Next`/`Skipped`/`NextOccurrence` (retry, manual-run rules, the RUN_ALL baseline), `DefinitionRules.NextRunAfterUpdate`. Every state-dependent transition is **lock, decide, write** in one `UnitsOfWork.WriteAsync` unit: lock the schedule row (`GetScheduleAsync`/`GetScheduleByActiveRunAsync( …, lockRow: true )`), decide in C# on what was locked, write by identifier. A candidate that fails to claim is logged at Error and passed over. |
 | `Pug.Scheduling.Data.Abstractions` | Schedule-store `IDataSession`: **storage primitives only** — reads (`GetScheduleAsync`/`GetScheduleByActiveRunAsync( …, lockRow )`, `GetDueCandidatesAsync`, runs) and unconditional writes by identifier (`SetExecutionAsync`, `SetOccurrenceStateAsync( OccurrenceProgress )`, `SetRunRequestedAsync`, `UpdateDefinitionAsync`, `SetPausedAsync`, `InsertRunAsync`, `FinishRunAsync`, `SetRunClaimantAsync`, `DeleteAsync`). No member decides anything; `GetDueCandidatesAsync` is a coarse pre-filter documented as mirroring `OccurrenceState.Classify`. Plus `UnitsOfWork` (`ReadAsync`/`WriteAsync`). |
 | `Pug.Scheduling.Data.Dapper` | `DapperDataSessionBase`: the schedule store's SQL, `ScheduleRow`, `Compose` and `JsonTypeHandler`, written once for every provider. Its dialect hooks are `EnabledNotPausedPredicate`, `RunRequestedPredicate`, `LockingReadClause` and `ReadTimestamp`. The due-candidate read is a `union` of three bounded branches, one per partial index (an `or` is a full scan on SQLite). |
 | `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores: **shared base + dialect overrides.** Each provider keeps a `DapperDataSession : DapperDataSessionBase` and its own `DapperData` (schema scripts). Postgres: `enabled and not paused`, `for update`, timestamps as stored. SQLite: `enabled = 1 and paused = 0`, no locking clause, D18 UTC stamping on read, and the session's own transaction enlistment (Conventions). SQL changes go in the base; a provider overrides only its dialect. |
-| `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → create handler → execute → dispose → heartbeat → report), one job at a time, constructed with its host-wide worker number and claiming as `( Claimant, number, JobType )`; pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. `WorkerOptions` (`Claimant` = machine name by default, `Workers`, `JobType`, intervals, `Validate()`); `SchedulerWorkerRegistry`. |
+| `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pump (poll → create handler → execute off the pump → heartbeat → dispose → report), **one attended job at a time**: a handler that ignores cancellation is cancelled, given `CancellationGrace`, then **detached** (reported TIMED_OUT, or abandoned without a report on claim loss/shutdown) and disposed when its task ends; at `MaxDetachedHandlers` the worker stops claiming. Constructed with its host-wide worker number and claiming as `( Claimant, number, JobType )`; pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. `WorkerOptions` (`Claimant` = machine name by default, `Workers`, `JobType`, `PollInterval`, `HeartbeatInterval`, `CancellationGrace` = 10 s, `MaxDetachedHandlers` = 2, `Validate()` incl. `TimerBounds`); `SchedulerWorkerRegistry`. |
 | `Pug.Scheduling.Worker.DependencyInjection` | net10.0 worker-host DI: `AddSchedulingWorkers( options, coordinator )` — once per worker group; numbers 1..N host-wide in registration order (accumulator singleton), one `IHostedService` singleton per worker (never `AddHostedService`: it dedups), optional per-group coordinator factory, registers `ISchedulerWorkerRegistry`; `AddScheduledJobHandler<T>(jobType)` (keyed scoped, one DI scope per run), `AddScheduledJobHandlerFactory<T>`; internal registry and scoped-handler wrapper. References no `Pug.Scheduling`/Data. Handler registration does not mark a type schedulable. |
-| `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `JobRunClaimRequest`, `JobRunCompletion`. Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
+| `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `RunInProgressResultInfo` (the 409 body of a refused run-now), `JobRunClaimRequest`, `JobRunCompletion`. Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…`, the out-of-process worker transport). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Multi-targeted, so it references only Abstractions/Models. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`workers`, `workers/{worker}`, `workers/{worker}/pause|resume`; the list shows only workers whose claimant the caller may view). Its own package so an out-of-process worker host references nothing it does not need. |
 | `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes; reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions only — a worker host must not pull in ASP.NET. |
@@ -43,8 +43,11 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
   composed from those columns. A lapsed lease stays until its run is adopted or completed, so a
   schedule with a lease always has a run in progress. The holder on the row is the authority for
   renewal and completion; `ScheduleRun.ClaimedBy` is audit only.
-- Every multi-statement unit is atomic on both providers, and every write that depends on the
-  schedule's state locks the row first and decides on what it locked (no business logic in SQL).
+- Every multi-statement unit is atomic on both providers (SQLite through its session's own
+  enlistment), and every write that depends on the schedule's state locks the row first and decides
+  on what it locked.
+- No business logic in the data access layer: sessions read, lock and write by identifier. The due
+  query is the one SQL that mirrors a rule, as a documented pre-filter of `OccurrenceState.Classify`.
 - `Owner` is not part of `ScheduleDefinition`; assigned at registration (defaults to current
   principal), immutable. Owner rule: `Type == "USER" && Identifier == current` — covers creating
   own schedules (no ACL) and view/modify/delete of owned schedules. Domain is immutable.
@@ -57,7 +60,9 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
   On completion FIRE_ONCE/SKIP coalesce an occurrence already due when it started; RUN_ALL keeps
   its backlog. A definition update moves `nextRun` only when idle and the recurrence changed.
 - Handlers are third-party: escaping exceptions / null returns become unsuccessful `JobOutcome`s;
-  timeouts are worker-enforced; claim loss or shutdown ⇒ abandon without reporting.
+  timeouts are worker-enforced; claim loss or shutdown ⇒ abandon without reporting. A worker
+  attends a single job at once; a handler that ignores cancellation is detached (it may overlap its own
+  retry) and counted in `DetachedJobs`.
 - All times UTC; cron in the recurrence's IANA time zone via Cronos.
 - Endpoints authorize nothing themselves — the facades do. `Scheduler` runs owner-rule-then-ACL;
   `ExecutionCoordinator` checks `CoordinatorSecurityOperations` qualified by **claimant identity**
@@ -87,11 +92,11 @@ in library code; `[DataContract]` records with the `#if NET5_0_OR_GREATER init/s
 pattern; data access via `UnitsOfWork`: `ApplicationDataProvider.ReadAsync/WriteAsync( ( session,
 context ) => …, context: new { … } )`, which are `ExecuteAsync`/`PerformAsync` in a `RequiresNew` scope.
 `ReadAsync` runs at RepeatableRead, for pure reads; `WriteAsync` runs at ReadCommitted, for every
-unit that writes. A write unit that acts on what it read locks the row first (`lockRow`). Nothing in
+unit that writes. A write unit that acts on what it read locks the row first (`lockRow`: Postgres `select … for update`; SQLite's `IMMEDIATE` write unit already serializes writers). Nothing in
 the domain layer begins or commits a transaction. **SQLite enlists itself** (the Pug.Sal pattern):
 Microsoft.Data.Sqlite ignores `TransactionScope`, so its `DapperData` enlists every session created in
 a scope. A write unit begins `IMMEDIATE`, taking the write lock up front, and a read unit begins
-deferred; both commit in phase one. Postgres must not copy this: Npgsql enlists natively.
+deferred; both commit in phase one. Postgres must not copy this: Npgsql enlists natively. SQL lives once in `DapperDataSessionBase`; a provider overrides only dialect hooks (never regenerate a provider by `sed`). Hosts on SQLite need WAL mode and must apply `GetSchemaUpgradeScripts()` in group order.
 Contracts multi-target `net6.0;net8.0;net10.0`,
 implementations `net10.0`. Tests: xUnit, per-fixture databases migrated by DbUp from
 `GetSchemaUpgradeScripts()`; Moq only for `ISecurityManager`. Store-backed suites are abstract

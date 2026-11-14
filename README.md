@@ -14,9 +14,9 @@ Design rationale for every major shape lives in [`docs/DECISIONS.md`](docs/DECIS
 | `Pug.Scheduling.Models` | Entities and wire contracts. Referenced by everything. |
 | `Pug.Scheduling.Abstractions` | `IScheduler`, `IExecutionCoordinator`, `ISchedulerWorker`, `ISchedulerWorkerRegistry`, security constants. |
 | `Pug.Scheduling` | The facades: `Scheduler` (management) and `ExecutionCoordinator` (execution). |
-| `Pug.Scheduling.Data.Abstractions` · `.Data.Postgres` · `.Data.SQLite` | Schedule store contract and its Dapper implementations. |
+| `Pug.Scheduling.Data.Abstractions` · `.Data.Dapper` · `.Data.Postgres` · `.Data.SQLite` | Schedule store contract (storage primitives and `UnitsOfWork`), the shared Dapper session, and the Postgres and SQLite providers. |
 | `Pug.Scheduling.JobHandler.Abstractions` | `IScheduledJobHandler`, `IScheduledJobHandlerFactory` and its registry — all a handler author references. |
-| `Pug.Scheduling.Worker` | `SchedulerWorker` — the execution pump, one job at a time — and `WorkerOptions`. |
+| `Pug.Scheduling.Worker` | `SchedulerWorker` — the execution pump, one attended job at a time — and `WorkerOptions`. |
 | `Pug.Scheduling.Worker.DependencyInjection` | `AddSchedulingWorkers` (one call per worker group), `AddScheduledJobHandler<T>`, `AddScheduledJobHandlerFactory<T>` — the worker host's DI. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling`, job type registration (`AddSchedulableJobType`, `AddJobPayloadValidator`). |
 | `Pug.Scheduling.WebApi.Models` | HTTP surface contracts shared by the endpoints and the clients. |
@@ -39,15 +39,23 @@ misfire handling, retry scheduling, and next-occurrence computation all live beh
 coordinator — a worker sees none of it, and binds the same interface whether it runs in-process or
 against a remote scheduler.
 
-Exclusivity comes from an execution lease held on the schedule's row, taken and released in the
-same transaction that records the run. Leases are short
-(2 minutes by default) and heartbeat-renewed, so a crashed worker's occurrence becomes claimable
-again: execution is **at-least-once**, and handlers should key side effects on
-`(Schedule, ScheduledFor)`.
+Exclusivity comes from the execution state on the schedule's own row (active run, holder, lease
+expiry): every claim, renewal and completion is one transaction that locks the row, decides, and
+writes. Leases are short (2 minutes by default) and heartbeat-renewed, so a crashed worker's
+occurrence is adopted again once its lease lapses: execution is **at-least-once**, and handlers
+should key side effects on `(Schedule, ScheduledFor)`. Lease expiry is judged by each scheduler
+host's clock, so `LeaseDuration` must exceed the clock skew between hosts. A handler must honour
+its cancellation token: one that does not is detached after `CancellationGrace` and may still be
+running when its occurrence is retried.
+
+Run-now (`POST schedules/{identifier}/run`) only raises a request marker; it never moves the next
+occurrence. It is refused with `RunInProgressException` (409) while a run of the schedule is in
+progress, live or lapsed, and a manual run is not retried if it fails.
 
 ## Hosting the scheduler
 
-The host registers the schedule store, then the framework:
+The host registers the schedule store (the only store: execution state lives on its schedule rows,
+and there is no separate lease provider), then the framework:
 
 ```csharp
 services.AddSingleton<IApplicationData<IDataSession>>(
@@ -62,10 +70,28 @@ services.AddScheduledJobHandler<ReportJobHandler>( "report" );      // executes 
 services.AddJobPayloadValidator<ReportPayloadValidator>( "report" ); // optional, checked at registration
 
 services.AddSchedulingWorkers( new WorkerOptions { Workers = 4 } );   // omit where jobs execute elsewhere
+// WorkerOptions also sets Claimant, JobType, PollInterval, HeartbeatInterval,
+// CancellationGrace (default 10 s) and MaxDetachedHandlers (default 2).
 ```
 
 The store exposes `GetSchemaUpgradeScripts()`; run them in the order given (schema version, then
-sequence) with DbUp or your migration tool of choice before first use.
+sequence) with DbUp or your migration tool of choice before first use. DbUp sorts by script name, so
+give each script group its own `RunGroupOrder` to keep that order.
+
+**SQLite host requirements.** Enable WAL journal mode (`PRAGMA journal_mode = WAL`) and a busy
+timeout: units of work run as real transactions (a write begins `IMMEDIATE`), and under WAL readers
+do not block the writer. Apply the schema scripts in group order, as above.
+
+**Status codes.** The facades' exceptions map to the endpoints' responses, and the clients map them
+back:
+
+| Response | Exception | Raised by |
+|---|---|---|
+| 400 `BadRequestResultInfo` | `ArgumentException` | invalid definition, including a `Timeout` over `TimerBounds.Maximum` (about 49.7 days) |
+| 403 | `NotAuthorized` | any operation without the grant |
+| 404 | `UnknownScheduleException` / `UnknownRunException` | unknown schedule or run |
+| 409 `RunInProgressResultInfo` | `RunInProgressException` | run-now while a run is active |
+| 409 | `ClaimNotHeldException` | completion by a worker that does not hold the run |
 
 Endpoints carry their own route prefixes, so map them at the root:
 
@@ -99,7 +125,7 @@ learns which implementation it holds.
 
 Each `AddSchedulingWorkers` call registers a **group**: `Workers` workers sharing one `Claimant`
 (the identity grants are qualified by) and, optionally, one `JobType` they alone claim. Every
-worker runs one job at a time, so a slow job holds up only its own worker. A group may bring its
+worker attends a single job at once, so a slow job holds up only its own worker. A group may bring its
 own coordinator, for instance a client carrying the group's own credentials:
 
 ```csharp
@@ -148,6 +174,6 @@ dotnet build Pug.Scheduling.slnx -warnaserror -m:1
 dotnet test tests/Pug.Scheduling.Tests
 ```
 
-Tests run against real SQLite stores. The Postgres providers are build-verified here — their SQL
-differs from the tested SQLite only in DDL types and boolean predicates — so CI should exercise
-them with Testcontainers, in particular the concurrent claim, adoption and completion races.
+Tests run against real SQLite stores and, through Testcontainers (Docker required; on this
+machine `sg docker -c "dotnet test tests/Pug.Scheduling.Tests"`), PostgreSQL. Use
+`--filter "Category!=Postgres"` without Docker.

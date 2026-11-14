@@ -13,7 +13,7 @@ namespace Pug.Scheduling.Worker
 		// distinct claimants.
 		public string Claimant { get; init; } = Environment.MachineName;
 
-		// Number of workers in the group, each claiming and executing one job at a time.
+		// Number of workers in the group, each claiming and executing one attended job at once.
 		public int Workers { get; init; } = 1;
 
 		// The only job type the group's workers claim; null claims any type.

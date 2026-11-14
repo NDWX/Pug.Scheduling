@@ -19,7 +19,7 @@ namespace Pug.Scheduling.Worker
 	/// job ever stops the poll loop. Cancellation is not assumed to be honored: a handler still
 	/// running <see cref="WorkerOptions.CancellationGrace"/> after its run was stopped (timeout,
 	/// claim lost, host stopping) is detached and left to end on its own, and the worker moves on.
-	/// The worker attends one job at a time; at <see cref="WorkerOptions.MaxDetachedHandlers"/>
+	/// The worker attends a single job at once; at <see cref="WorkerOptions.MaxDetachedHandlers"/>
 	/// detached handlers it stops claiming until one ends.
 	/// </summary>
 	public sealed class SchedulerWorker : BackgroundService, ISchedulerWorker

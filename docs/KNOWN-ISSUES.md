@@ -2,6 +2,11 @@
 
 ## SQLite writes are not atomic (found 2026-10-09, from Pug.Sal phase 2)
 
+**RESOLVED for Pug.Scheduling in #10, sub-phase A** (2026-11-14), with the Pug.Sal pattern described
+below: the SQLite session now enlists itself, so units of work are atomic and write units hold the
+write lock. See `DECISIONS.md` D24. The enlistment code now exists in both repos; moving it to a
+shared package is tracked in #13. The original report follows unchanged.
+
 **What happens.** Microsoft.Data.Sqlite ignores the ambient `System.Transactions` transaction. As
 a result, the `TransactionScope` that `ApplicationData.ExecuteAsync` / `PerformAsync` (from
 Pug.Application.Data) open around each unit of work has no effect on the SQLite schedule and lease
@@ -40,3 +45,16 @@ rationale in `Pug.Sal/docs/DECISIONS.md` D15):
   Under a deferred `BEGIN` that is what serializes concurrent read-then-write units of work.
 - **Tests:** Sal checks the fix with a rollback test (`FailedUnitOfWorkRollsBackEveryWrite`) and a
   concurrency test (`ConcurrentTransactionsGetDistinctVersions`, six parallel units of work).
+
+## Schedules stalled under schema v2 stay stuck after the v3 migration (noted 2026-11-14, #10)
+
+**What happens.** Under v2, completion could write back a stale `nextRun` (#8, F3), leaving a
+schedule whose `nextRun` points at an occurrence that already finished. Every claim then finds that
+occurrence done and discards the candidate, so the schedule stalls. The v3 migration backfills the
+execution columns but does not repair `nextRun`, so such a schedule stays stalled.
+
+**Workaround.** Run-now unsticks a FIRE_ONCE or SKIP schedule: the manual run completes and
+coalesces the overdue occurrence onto the grid. It does not unstick a RUN_ALL schedule, which keeps
+its backlog by design; update its recurrence while idle, or re-register it.
+
+**Status.** Accepted: the package is pre-release and no v2 database is deployed.
