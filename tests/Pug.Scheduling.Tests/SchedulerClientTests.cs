@@ -149,8 +149,13 @@ public class SchedulerClientTests : IClassFixture<SchedulingApiFixture>
 		RunInProgressException exception =
 			await Assert.ThrowsAsync<RunInProgressException>( () => _scheduler.RunNowAsync( identifier ) );
 
+		ScheduleInfo schedule = await _scheduler.GetScheduleAsync( identifier );
+
 		Assert.Equal( identifier, exception.Schedule );
-		Assert.False( ( await _scheduler.GetScheduleAsync( identifier ) ).State.RunRequested );
+		Assert.Equal( schedule.ExecutionLease.Run, exception.Run );
+		Assert.Equal( "elsewhere/1", exception.Holder );
+		Assert.Equal( schedule.ExecutionLease.Expiry, exception.LeaseExpiry );
+		Assert.False( schedule.State.RunRequested );
 	}
 
 	[Fact]

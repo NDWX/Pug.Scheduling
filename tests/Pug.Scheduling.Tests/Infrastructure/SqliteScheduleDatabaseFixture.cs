@@ -1,6 +1,4 @@
 using DbUp;
-using DbUp.Builder;
-using DbUp.Engine;
 using Microsoft.Data.Sqlite;
 using Pug.Application.Data;
 using Pug.Scheduling.Data.Abstractions;
@@ -43,19 +41,7 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 
 	private static void UpgradeDatabase( string connectionString, DapperData data )
 	{
-		UpgradeEngineBuilder builder = DeployChanges.To.SqliteDatabase( connectionString );
-
-		// Applied in the order given (schema version, then sequence): DbUp would otherwise sort by name.
-		int order = 0;
-
-		foreach( SchemaUpgradeScript schemaScript in data.GetSchemaUpgradeScripts() )
-			builder = builder.WithScript(
-					schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script, new SqlScriptOptions { RunGroupOrder = order++ } );
-
-		DatabaseUpgradeResult result = builder.LogToNowhere().Build().PerformUpgrade();
-
-		if( !result.Successful )
-			throw new InvalidOperationException( "DbUp schema migration failed.", result.Error );
+		SchemaUpgrade.Apply( DeployChanges.To.SqliteDatabase( connectionString ), data.GetSchemaUpgradeScripts() );
 
 		using SqliteConnection connection = new( connectionString );
 		connection.Open();

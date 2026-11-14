@@ -1,5 +1,4 @@
 using DbUp;
-using DbUp.Builder;
 using DbUp.Engine;
 using Npgsql;
 using Pug.Application.Data;
@@ -51,22 +50,8 @@ internal static class PostgresTestServer
 				.ConnectionString;
 	}
 
-	public static void UpgradeDatabase( string connectionString, IEnumerable<SchemaUpgradeScript> schemaScripts )
-	{
-		UpgradeEngineBuilder builder = DeployChanges.To.PostgresqlDatabase( connectionString );
-
-		// Applied in the order given (schema version, then sequence): DbUp would otherwise sort by name.
-		int order = 0;
-
-		foreach( SchemaUpgradeScript schemaScript in schemaScripts )
-			builder = builder.WithScript(
-					schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script, new SqlScriptOptions { RunGroupOrder = order++ } );
-
-		DatabaseUpgradeResult result = builder.LogToNowhere().Build().PerformUpgrade();
-
-		if( !result.Successful )
-			throw new InvalidOperationException( "DbUp schema migration failed.", result.Error );
-	}
+	public static void UpgradeDatabase( string connectionString, IEnumerable<SchemaUpgradeScript> schemaScripts ) =>
+		SchemaUpgrade.Apply( DeployChanges.To.PostgresqlDatabase( connectionString ), schemaScripts );
 
 	public static async Task DropDatabaseAsync( string connectionString )
 	{

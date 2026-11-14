@@ -3,7 +3,7 @@ using Pug.Scheduling.Models;
 namespace Pug.Scheduling
 {
 	// What a claim does with a schedule, as decided by OccurrenceState.Classify.
-	public enum OccurrenceAction
+	internal enum OccurrenceAction
 	{
 		// Nothing to do: not due, paused or disabled, or its run is held by a live peer.
 		NotDue,
@@ -32,7 +32,7 @@ namespace Pug.Scheduling
 	// Classifies a schedule for a claim, and derives the run a claim starts. Pure functions of the
 	// schedule's state: the coordinator applies them to the schedule row it has locked, and the
 	// store's due-candidate pre-filter (IDataSession.GetDueCandidatesAsync) mirrors Classify.
-	public static class OccurrenceState
+	internal static class OccurrenceState
 	{
 		// Precedence: adopt (a run in progress always comes first, so its occurrence is never
 		// recorded twice) > MANUAL > RETRY > MISFIRE / SKIP / SCHEDULE. holder is the claiming

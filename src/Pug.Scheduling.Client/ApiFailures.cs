@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Pug.Application.Security;
 using Pug.HttpApiClient;
+using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.Client;
@@ -48,6 +49,27 @@ internal static class ApiFailures
 					},
 					unknownResource
 				).ConfigureAwait( false );
+
+	// The endpoint renders RunInProgressException as RunInProgressResultInfo; a body that does not
+	// deserialize still yields the exception, without the details of the run in progress.
+	internal static RunInProgressException AsRunInProgressException( string schedule, HttpApiRequestException exception )
+	{
+		RunInProgressResultInfo? info = null;
+
+		if( !string.IsNullOrWhiteSpace( exception.ResponseMessage ) )
+			try
+			{
+				info = JsonSerializer.Deserialize<RunInProgressResultInfo>( exception.ResponseMessage, JsonOptions );
+			}
+			catch( JsonException )
+			{
+				// Not a structured body — the details are simply unknown.
+			}
+
+		return info is null
+					? new RunInProgressException( schedule )
+					: new RunInProgressException( schedule, info.Run, info.Holder, info.LeaseExpiry );
+	}
 
 	// The facade reports validation failures as ArgumentException; the endpoint renders those as
 	// BadRequestResultInfo, so the client reverses exactly that mapping. A body that does not

@@ -43,24 +43,25 @@ public class OccurrenceStateTests
 	private static ExecutionLease Lease( string holder, DateTime expiry ) =>
 		new() { Run = "run-1", ClaimedBy = holder, Expiry = expiry };
 
+	// The action is an object: xunit needs public signatures, and OccurrenceAction is internal.
 	[Theory]
 	[InlineData( 10, OccurrenceAction.NotDue )] // not yet due
 	[InlineData( 0, OccurrenceAction.Schedule )] // due right now
 	[InlineData( -5 * 60, OccurrenceAction.Schedule )] // overdue by exactly the threshold
 	[InlineData( -5 * 60 - 1, OccurrenceAction.Misfire )] // beyond it
-	public void IdleScheduleIsClassifiedByItsNextOccurrence( int dueInSeconds, OccurrenceAction expected )
+	public void IdleScheduleIsClassifiedByItsNextOccurrence( int dueInSeconds, object expected )
 	{
-		Assert.Equal( expected, OccurrenceState.Classify( Schedule( Now.AddSeconds( dueInSeconds ) ), Now, Holder ) );
+		Assert.Equal( (OccurrenceAction)expected, OccurrenceState.Classify( Schedule( Now.AddSeconds( dueInSeconds ) ), Now, Holder ) );
 	}
 
 	[Theory]
 	[InlineData( MisfireHandlings.FireOnce, OccurrenceAction.Misfire )]
 	[InlineData( MisfireHandlings.RunAll, OccurrenceAction.Misfire )]
 	[InlineData( MisfireHandlings.Skip, OccurrenceAction.Skip )]
-	public void MisfiredOccurrenceFollowsThePolicy( string handling, OccurrenceAction expected )
+	public void MisfiredOccurrenceFollowsThePolicy( string handling, object expected )
 	{
 		Assert.Equal(
-				expected,
+				(OccurrenceAction)expected,
 				OccurrenceState.Classify( Schedule( Now.AddHours( -1 ), misfireHandling: handling ), Now, Holder ) );
 	}
 
@@ -176,9 +177,9 @@ public class OccurrenceStateTests
 	[InlineData( OccurrenceAction.Misfire, RunTriggers.Misfire )]
 	[InlineData( OccurrenceAction.Skip, RunTriggers.Misfire )]
 	[InlineData( OccurrenceAction.Schedule, RunTriggers.Schedule )]
-	public void TriggerFollowsTheAction( OccurrenceAction action, string trigger )
+	public void TriggerFollowsTheAction( object action, string trigger )
 	{
-		Assert.Equal( trigger, OccurrenceState.Trigger( action ) );
+		Assert.Equal( trigger, OccurrenceState.Trigger( (OccurrenceAction)action ) );
 	}
 
 	[Fact]

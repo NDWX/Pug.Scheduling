@@ -116,7 +116,7 @@ public static class SchedulingEndpoints
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound )
-			.Produces( StatusCodes.Status409Conflict );
+			.Produces<RunInProgressResultInfo>( StatusCodes.Status409Conflict );
 
 		routes.MapPut( "schedules/{identifier}", UpdateScheduleDefinition )
 			.RequireAuthorization()
@@ -410,10 +410,12 @@ public static class SchedulingEndpoints
 		{
 			return Results.NotFound();
 		}
-		catch( RunInProgressException )
+		catch( RunInProgressException exception )
 		{
 			// Refused, not queued: nothing was recorded.
-			return Results.Conflict();
+			return Results.Conflict(
+					new RunInProgressResultInfo(
+							exception.Schedule, exception.Run, exception.Holder, exception.LeaseExpiry ) );
 		}
 	}
 }

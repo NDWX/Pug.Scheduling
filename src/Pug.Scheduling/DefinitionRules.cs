@@ -4,7 +4,7 @@ namespace Pug.Scheduling
 {
 	// How a definition update affects the schedule's state. A pure function of the schedule (as
 	// locked for the update), the new definition and the time.
-	public static class DefinitionRules
+	internal static class DefinitionRules
 	{
 		// The schedule's next occurrence once its definition is replaced by definition at now. A
 		// changed recurrence restarts occurrence computation from now, unless a retry is pending:

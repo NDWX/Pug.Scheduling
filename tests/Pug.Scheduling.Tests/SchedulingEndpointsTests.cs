@@ -344,11 +344,18 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 
 		Assert.Equal( HttpStatusCode.Conflict, response.StatusCode );
 
+		RunInProgressResultInfo body = await SchedulingApiFixture.ReadAsync<RunInProgressResultInfo>( response );
+
 		ScheduleInfo schedule =
 			await SchedulingApiFixture.ReadAsync<ScheduleInfo>( await client.GetAsync( $"/schedules/{identifier}" ) );
 
 		Assert.False( schedule.State.RunRequested );
 		Assert.Equal( "elsewhere/1", schedule.ExecutionLease.ClaimedBy );
+
+		Assert.Equal( identifier, body.Schedule );
+		Assert.Equal( schedule.ExecutionLease.Run, body.Run );
+		Assert.Equal( "elsewhere/1", body.Holder );
+		Assert.Equal( schedule.ExecutionLease.Expiry, body.LeaseExpiry );
 	}
 
 	[Fact]

@@ -112,8 +112,7 @@ public class SchedulerClient : ApiClient, IScheduler
 					}
 					catch( HttpApiRequestException exception ) when( exception.ResponseStatusCode == HttpStatusCode.Conflict )
 					{
-						// The status carries no details of the run in progress.
-						throw new RunInProgressException( identifier );
+						throw ApiFailures.AsRunInProgressException( identifier, exception );
 					}
 				},
 				() => new UnknownScheduleException( identifier )

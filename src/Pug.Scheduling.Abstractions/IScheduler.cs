@@ -7,8 +7,9 @@ using Pug.Scheduling.Models;
 namespace Pug.Scheduling.Abstractions
 {
 	// Management facade over the schedule store: configuration and observation only. This
-	// interface never executes jobs — run-now merely records a request for a worker to claim. It is the single wire contract implemented by the in-process facade (and
-	// any future HTTP client), so keep it the source of truth for the scheduler's capabilities.
+	// interface never executes jobs — run-now merely records a request for a worker to
+	// claim. It is the single wire contract implemented by the in-process facade (and any future
+	// HTTP client), so keep it the source of truth for the scheduler's capabilities.
 	//
 	// Authorization: every operation is checked against the schedule's domain. The schedule's
 	// Owner principal may always create their own schedules and view, modify, and delete
@@ -33,13 +34,14 @@ namespace Pug.Scheduling.Abstractions
 		Task<ScheduleInfo> GetScheduleAsync( string identifier );
 
 		// Replaces the schedule's definition wholesale, re-validating as for registration, and
-		// recomputes the next occurrence when the recurrence changed, unless a retry is pending
-		// (the retry keeps its time; the new recurrence applies once the occurrence completes). A
-		// run in progress, a pending retry and a run request are left as they are. Domain is
-		// immutable: a
-		// definition carrying a different value is rejected (the schedule's Owner is not part of
-		// the definition and can never change). Updates the schedule's LastUpdate. Throws
-		// UnknownScheduleException when the schedule does not exist.
+		// recomputes the next occurrence from now when the recurrence changed and no retry is
+		// pending (attempt 0), even while a run is in progress; that run's completion then
+		// recomputes the next occurrence again from the updated definition. With a retry pending,
+		// the retry keeps its time and the new recurrence applies once the occurrence completes.
+		// A run in progress, a pending retry and a run request are themselves left as they are.
+		// Domain is immutable: a definition carrying a different value is rejected (the
+		// schedule's Owner is not part of the definition and can never change). Updates the
+		// schedule's LastUpdate. Throws UnknownScheduleException when the schedule does not exist.
 		Task UpdateDefinitionAsync( string identifier, ScheduleDefinition definition );
 
 		// Deletes the schedule and its run history. A run currently executing is not interrupted,

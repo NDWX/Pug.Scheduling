@@ -19,6 +19,10 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<InternalsVisibleTo Include="Pug.Scheduling.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<ProjectReference Include="../Pug.Scheduling.Abstractions/Pug.Scheduling.Abstractions.csproj" />
 		<ProjectReference Include="../Pug.Scheduling.Data.Abstractions/Pug.Scheduling.Data.Abstractions.csproj" />
 	</ItemGroup>

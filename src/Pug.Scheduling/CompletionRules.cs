@@ -6,7 +6,7 @@ namespace Pug.Scheduling
 	// How a schedule's occurrence progresses when a run of it completes or an occurrence is
 	// skipped. Pure functions of the schedule (as locked for the transition), the run and the
 	// time: the coordinator writes what they return.
-	public static class CompletionRules
+	internal static class CompletionRules
 	{
 		// The schedule's progress once run, executed for it, finished with result at now.
 		//
@@ -20,11 +20,15 @@ namespace Pug.Scheduling
 		//   retry's attempt, so it counts as the retry.
 		//
 		// The run request is carried over as it stands: these rules never consume one.
-		public static OccurrenceProgress Next( ScheduleInfo schedule, ScheduleRun run, string result, DateTime now )
+		//
+		// finished is when the run actually ended, recorded as the schedule's last run; it defaults
+		// to now, and differs only when a completion is applied after the fact (a repair).
+		public static OccurrenceProgress Next( ScheduleInfo schedule, ScheduleRun run, string result, DateTime now,
+												DateTime? finished = null )
 		{
 			ScheduleDefinition definition = schedule.Definition;
 			ScheduleState state = schedule.State;
-			RunSummary lastRun = new() { Started = run.Started, Finished = now, Result = result };
+			RunSummary lastRun = new() { Started = run.Started, Finished = finished ?? now, Result = result };
 
 			if( IsManual( run ) )
 				return new OccurrenceProgress(

@@ -1,7 +1,6 @@
 using System.Data.Common;
 using Dapper;
 using DbUp;
-using DbUp.Builder;
 using DbUp.Engine;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -177,22 +176,8 @@ public sealed class SqliteScheduleStoreMigrationTests : ScheduleStoreMigrationTe
 	protected override ApplicationData<IDataSession> CreateStore( string connectionString ) =>
 		new Data.SQLite.DapperData( connectionString, SqliteFactory.Instance );
 
-	protected override void Upgrade( string connectionString, IEnumerable<SchemaUpgradeScript> scripts )
-	{
-		UpgradeEngineBuilder builder = DeployChanges.To.SqliteDatabase( connectionString );
-
-		// Applied in the order given (schema version, then sequence): DbUp would otherwise sort by name.
-		int order = 0;
-
-		foreach( SchemaUpgradeScript script in scripts )
-			builder = builder.WithScript(
-					script.UpgradeScript.Name, script.UpgradeScript.Script, new SqlScriptOptions { RunGroupOrder = order++ } );
-
-		DatabaseUpgradeResult result = builder.LogToNowhere().Build().PerformUpgrade();
-
-		if( !result.Successful )
-			throw new InvalidOperationException( "DbUp schema migration failed.", result.Error );
-	}
+	protected override void Upgrade( string connectionString, IEnumerable<SchemaUpgradeScript> scripts ) =>
+		SchemaUpgrade.Apply( DeployChanges.To.SqliteDatabase( connectionString ), scripts );
 
 	protected override DbConnection Connect( string connectionString ) => new SqliteConnection( connectionString );
 }

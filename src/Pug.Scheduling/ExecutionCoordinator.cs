@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.Logging;
 using Pug.Application.Data;
 using Pug.Application.Security;
@@ -126,6 +127,21 @@ namespace Pug.Scheduling
 		private Task<T> InUnitAsync<T>( Func<IDataSession, Task<T>> transition ) =>
 			_applicationDataProvider.WriteAsync( ( session, apply ) => apply( session ), transition );
 
+		// A run of the schedule's occurrence started now by the caller.
+		private ScheduleRun NewRun( ScheduleInfo schedule, DateTime scheduledFor, int attempt, string trigger,
+									Caller caller, DateTime now ) =>
+			new()
+			{
+				Identifier = _identifierGenerator.GetNext(),
+				Schedule = schedule.Identifier,
+				Domain = schedule.Definition.Domain,
+				ScheduledFor = scheduledFor,
+				Started = now,
+				Attempt = attempt,
+				Trigger = trigger,
+				ClaimedBy = caller.Holder
+			};
+
 		private ExecutionLease NewLease( string run, Caller caller, DateTime now ) =>
 			new() { Run = run, ClaimedBy = caller.Holder, Expiry = now + _options.LeaseDuration };
 
@@ -155,13 +171,25 @@ namespace Pug.Scheduling
 							}
 						).ConfigureAwait( false );
 
+			Exception lastFailure = null;
+			bool anyCandidateHandled = false;
+
 			foreach( string candidate in candidates )
 			{
-				ClaimedJob job = await TryClaimCandidateAsync( candidate, caller ).ConfigureAwait( false );
+				( ClaimedJob job, Exception failure ) =
+					await TryClaimCandidateAsync( candidate, caller ).ConfigureAwait( false );
 
 				if( job is not null )
 					return job;
+
+				lastFailure = failure;
+				anyCandidateHandled |= failure is null;
 			}
+
+			// Every candidate failed: that is a fault, not an idle window, so it is not reported as
+			// "no work" — the worker sees the failure.
+			if( lastFailure is not null && !anyCandidateHandled )
+				ExceptionDispatchInfo.Capture( lastFailure ).Throw();
 
 			_logger.LogDebug(
 					"No due work for claimant {Claimant} worker {Worker} (job type {JobType}).",
@@ -172,11 +200,13 @@ namespace Pug.Scheduling
 
 		// A candidate that fails to claim is logged and passed over: one broken schedule must not
 		// keep the rest of the window from being claimed. Its unit rolled back, so it stays as it was.
-		private async Task<ClaimedJob> TryClaimCandidateAsync( string schedule, Caller caller )
+		// The failure is returned so the caller can tell a window that failed throughout from one
+		// that merely had nothing to hand out.
+		private async Task<(ClaimedJob Job, Exception Failure)> TryClaimCandidateAsync( string schedule, Caller caller )
 		{
 			try
 			{
-				return await InUnitAsync( session => ClaimAsync( session, schedule, caller ) ).ConfigureAwait( false );
+				return ( await InUnitAsync( session => ClaimAsync( session, schedule, caller ) ).ConfigureAwait( false ), null );
 			}
 			catch( Exception exception )
 			{
@@ -185,7 +215,7 @@ namespace Pug.Scheduling
 						"Claimant {Claimant} worker {Worker} failed to claim schedule {Schedule}; moving to the next candidate.",
 						caller.Claimant, caller.Worker, schedule );
 
-				return null;
+				return ( null, exception );
 			}
 		}
 
@@ -229,17 +259,9 @@ namespace Pug.Scheduling
 		private async Task<ClaimedJob> StartRunAsync( IDataSession session, ScheduleInfo schedule,
 													OccurrenceAction action, Caller caller, DateTime now )
 		{
-			ScheduleRun run = new()
-			{
-				Identifier = _identifierGenerator.GetNext(),
-				Schedule = schedule.Identifier,
-				Domain = schedule.Definition.Domain,
-				ScheduledFor = OccurrenceState.ScheduledFor( schedule, action, now ),
-				Started = now,
-				Attempt = schedule.State.Attempt,
-				Trigger = OccurrenceState.Trigger( action ),
-				ClaimedBy = caller.Holder
-			};
+			ScheduleRun run = NewRun(
+					schedule, OccurrenceState.ScheduledFor( schedule, action, now ), schedule.State.Attempt,
+					OccurrenceState.Trigger( action ), caller, now );
 
 			ExecutionLease lease = NewLease( run.Identifier, caller, now );
 
@@ -302,11 +324,11 @@ namespace Pug.Scheduling
 					"schedule can be claimed again.",
 					schedule.Identifier, schedule.ExecutionLease.Run, run is null ? "missing" : "finished" );
 
-			await session.SetExecutionAsync( schedule.Identifier, null ).ConfigureAwait( false );
-
-			if( run is not null )
-				await session.SetOccurrenceStateAsync(
-								schedule.Identifier, CompletionRules.Next( schedule, run, run.Result, now ) )
+			if( run is null )
+				await session.SetExecutionAsync( schedule.Identifier, null ).ConfigureAwait( false );
+			else
+				await ReleaseAndProgressAsync(
+								session, schedule, CompletionRules.Next( schedule, run, run.Result, now, run.Finished ) )
 							.ConfigureAwait( false );
 		}
 
@@ -318,19 +340,9 @@ namespace Pug.Scheduling
 			DateTime occurrence = OccurrenceState.ScheduledFor( schedule, OccurrenceAction.Skip, now );
 			OccurrenceProgress progress = CompletionRules.Skipped( schedule, occurrence, now );
 
-			ScheduleRun run = new()
-			{
-				Identifier = _identifierGenerator.GetNext(),
-				Schedule = schedule.Identifier,
-				Domain = schedule.Definition.Domain,
-				ScheduledFor = occurrence,
-				Started = now,
-				Finished = now,
-				Attempt = 0,
-				Trigger = OccurrenceState.Trigger( OccurrenceAction.Skip ),
-				Result = RunResults.Skipped,
-				ClaimedBy = caller.Holder
-			};
+			ScheduleRun run = NewRun(
+							schedule, occurrence, 0, OccurrenceState.Trigger( OccurrenceAction.Skip ), caller, now )
+						with { Finished = now, Result = RunResults.Skipped };
 
 			await session.InsertRunAsync( run ).ConfigureAwait( false );
 			await session.SetOccurrenceStateAsync( schedule.Identifier, progress ).ConfigureAwait( false );
@@ -414,19 +426,8 @@ namespace Pug.Scheduling
 				.ConfigureAwait( false );
 
 			(string schedule, ScheduleRun completed, OccurrenceProgress progress) =
-				await InUnitAsync(
-							async session =>
-							{
-								(ScheduleInfo locked, ScheduleRun record) =
-									await ResolveCompletionAsync( session, run, caller ).ConfigureAwait( false );
-
-								OccurrenceProgress next = await RecordCompletionAsync(
-																session, locked, record, result, outcome )
-															.ConfigureAwait( false );
-
-								return ( locked.Identifier, record, next );
-							}
-						).ConfigureAwait( false );
+				await InUnitAsync( session => CompleteAsync( session, run, caller, result, outcome ) )
+					.ConfigureAwait( false );
 
 			_logger.LogInformation(
 					"Recorded completion of run {Run} of schedule {Schedule} by claimant {Claimant} worker {Worker}: " +
@@ -437,6 +438,19 @@ namespace Pug.Scheduling
 				_logger.LogInformation(
 						"Scheduled retry {Attempt} of schedule {Schedule} (occurrence {ScheduledFor}) for {NextRun}.",
 						progress.Attempt, schedule, completed.ScheduledFor, progress.NextRun );
+		}
+
+		// Resolves the run being completed and records its completion; returns what the caller logs.
+		private async Task<(string Schedule, ScheduleRun Run, OccurrenceProgress Progress)> CompleteAsync(
+			IDataSession session, string run, Caller caller, string result, JobOutcome outcome )
+		{
+			(ScheduleInfo locked, ScheduleRun record) =
+				await ResolveCompletionAsync( session, run, caller ).ConfigureAwait( false );
+
+			OccurrenceProgress next =
+				await RecordCompletionAsync( session, locked, record, result, outcome ).ConfigureAwait( false );
+
+			return ( locked.Identifier, record, next );
 		}
 
 		// The locked schedule and the run being completed, if the reporter holds the run. The run
@@ -485,10 +499,17 @@ namespace Pug.Scheduling
 			OccurrenceProgress progress = CompletionRules.Next( schedule, run, result, now );
 
 			await session.FinishRunAsync( run.Identifier, now, result, outcome ).ConfigureAwait( false );
-			await session.SetExecutionAsync( schedule.Identifier, null ).ConfigureAwait( false );
-			await session.SetOccurrenceStateAsync( schedule.Identifier, progress ).ConfigureAwait( false );
+			await ReleaseAndProgressAsync( session, schedule, progress ).ConfigureAwait( false );
 
 			return progress;
+		}
+
+		// Releases the schedule's lease and writes its progressed occurrence.
+		private static async Task ReleaseAndProgressAsync( IDataSession session, ScheduleInfo schedule,
+															OccurrenceProgress progress )
+		{
+			await session.SetExecutionAsync( schedule.Identifier, null ).ConfigureAwait( false );
+			await session.SetOccurrenceStateAsync( schedule.Identifier, progress ).ConfigureAwait( false );
 		}
 	}
 }

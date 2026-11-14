@@ -423,21 +423,18 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( "claimant", exception.ParamName );
 	}
 
-	// #7: one schedule that cannot be claimed (here a schedule stalled before schema v3, whose
-	// next occurrence was already recorded as finished) is logged and passed over; the rest of the
-	// window is still claimed.
-	[Fact]
-	public async Task FailingCandidateDoesNotBlockTheWindow()
+	// A schedule stalled before schema v3: its next occurrence was already recorded as finished,
+	// so claiming it fails.
+	private async Task<string> InsertUnclaimableScheduleAsync()
 	{
 		DateTime stalledOccurrence = Now.AddMinutes( -2 );
 
-		string broken = await InsertScheduleAsync( stalledOccurrence );
-		string healthy = await InsertDueScheduleAsync();
+		string schedule = await InsertScheduleAsync( stalledOccurrence );
 
 		ScheduleRun finished = new()
 		{
 			Identifier = $"run-{Guid.NewGuid():N}",
-			Schedule = broken,
+			Schedule = schedule,
 			Domain = Domain,
 			ScheduledFor = stalledOccurrence,
 			Started = stalledOccurrence,
@@ -449,11 +446,36 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		await _scheduleDatabase.ApplicationData.WriteAsync( ( session, context ) => session.InsertRunAsync( context ), finished );
 
+		return schedule;
+	}
+
+	// #7: one schedule that cannot be claimed (here a schedule stalled before schema v3, whose
+	// next occurrence was already recorded as finished) is logged and passed over; the rest of the
+	// window is still claimed.
+	[Fact]
+	public async Task FailingCandidateDoesNotBlockTheWindow()
+	{
+		string broken = await InsertUnclaimableScheduleAsync();
+		string healthy = await InsertDueScheduleAsync();
+
 		await ClaimSingleAsync( healthy );
 
 		// The broken schedule's failed claim rolled back whole: no lease, no second run.
 		Assert.Null( ( await GetScheduleAsync( broken ) ).ExecutionLease );
 		Assert.Single( await GetRunsAsync( broken ) );
+	}
+
+	// A window that failed throughout is a fault, not an idle poll: the claim throws rather than
+	// reporting that no work is due. (A window in which any candidate was merely passed over, as
+	// FailingCandidateDoesNotBlockTheWindow's, returns null as before.)
+	[Fact]
+	public async Task WindowOfOnlyFailingCandidatesThrows()
+	{
+		string broken = await InsertUnclaimableScheduleAsync();
+
+		await Assert.ThrowsAnyAsync<Exception>( () => _coordinator.ClaimDueJobAsync( Claimant, 1, _jobType ) );
+
+		Assert.Null( ( await GetScheduleAsync( broken ) ).ExecutionLease );
 	}
 
 	// == Complete ==
@@ -779,8 +801,10 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		ClaimedJob job = await ClaimSingleAsync( schedule );
 
+		DateTime finishedAt = Now;
+
 		await _scheduleDatabase.ApplicationData.WriteAsync(
-				( session, context ) => session.FinishRunAsync( context, Now, RunResults.Succeeded, null ),
+				( session, context ) => session.FinishRunAsync( context, finishedAt, RunResults.Succeeded, null ),
 				job.Context.Run );
 
 		LapseClaims();
@@ -790,6 +814,8 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		ScheduleInfo repaired = await GetScheduleAsync( schedule );
 
 		Assert.Null( repaired.ExecutionLease );
+		Assert.NotEqual( finishedAt, Now );
+		Assert.Equal( finishedAt, repaired.State.LastRun!.Finished );
 		Assert.Equal( Now.AddHours( 1 ), repaired.State.NextRun );
 		Assert.Equal( RunResults.Succeeded, repaired.State.LastRun!.Result );
 		Assert.Equal( $"{Claimant}/1", Assert.Single( await GetRunsAsync( schedule ) ).ClaimedBy );
@@ -1035,7 +1061,10 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	[Fact]
 	public async Task LateCompletionRacingAdoptionHasExactlyOneWinner()
 	{
-		const int iterations = 60;
+		// Run at least this many iterations, then until both orderings have occurred, up to a cap:
+		// how the two land is up to the scheduler, so a fixed count could end without one of them.
+		const int minimumIterations = 60;
+		const int maximumIterations = 1000;
 		const string completer = "late-completer";
 		const string adopter = "adopter";
 
@@ -1052,7 +1081,9 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		int adopted = 0;
 		List<string> failures = new();
 
-		for( int iteration = 0; iteration < iterations; iteration++ )
+		for( int iteration = 0;
+			iteration < maximumIterations && ( iteration < minimumIterations || completed == 0 || adopted == 0 );
+			iteration++ )
 		{
 			string schedule = await InsertDueScheduleAsync();
 
@@ -1107,6 +1138,50 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		// Both orderings must actually have been exercised, or the test proves nothing.
 		Assert.True( completed > 0, $"The completion never won ({adopted} adoptions)." );
 		Assert.True( adopted > 0, $"The adoption never won ({completed} completions)." );
+	}
+
+	// The worker's renewal races its own completion of the run, which clears the schedule's active
+	// run. Whichever lands, the lease is gone afterwards: a renewal after the completion is refused
+	// (false) rather than re-creating it, and one before it is simply overwritten by the release.
+	[Fact]
+	public async Task RenewRacingCompletionNeverResurrectsTheLease()
+	{
+		const int iterations = 60;
+
+		List<string> failures = new();
+
+		for( int iteration = 0; iteration < iterations; iteration++ )
+		{
+			string schedule = await InsertDueScheduleAsync();
+
+			ClaimedJob job = await ClaimSingleAsync( schedule );
+
+			bool renewed = false;
+			TimeSpan stagger = Stagger( iteration );
+
+			(Exception? completionError, Exception? renewError, _) = await RaceAsync(
+					stagger, () => CompleteAsync( job ),
+					async () =>
+					{
+						renewed = await _coordinator.RenewClaimAsync( job.Context.Run, Claimant, 1 );
+
+						return (ClaimedJob?)null;
+					} );
+
+			ScheduleInfo after = await GetScheduleAsync( schedule );
+			ScheduleRun[] runs = await GetRunsAsync( schedule );
+
+			if( completionError is not null || renewError is not null || after.ExecutionLease is not null ||
+				runs.Length != 1 || runs[0].Finished is null )
+				failures.Add(
+						$"iteration {iteration} (stagger {stagger.TotalMilliseconds} ms): " +
+						$"completion {Describe( completionError )}; renewal {Describe( renewError )} (renewed {renewed}); " +
+						$"lease {after.ExecutionLease?.ClaimedBy ?? "none"}; {runs.Length} run row(s)" );
+
+			await DeleteScheduleAsync( schedule );
+		}
+
+		Assert.True( failures.Count == 0, string.Join( Environment.NewLine, failures ) );
 	}
 
 	// The management facade writes the same schedule row the coordinator's completion advances:
