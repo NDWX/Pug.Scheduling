@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Transactions;
 using Pug.Application.Data;
 using Pug.Scheduling.Data.Abstractions;
 using static System.String;
@@ -15,9 +16,16 @@ namespace Pug.Scheduling.Data.SQLite
 		{
 		}
 
+		// A session created inside a unit of work's scope enlists in it itself: Microsoft.Data.Sqlite
+		// would otherwise autocommit every statement (see DapperDataSession).
 		protected override IDataSession CreateApplicationDataSession( IDbConnection databaseSession, DbProviderFactory dataAccessProvider )
 		{
-			return new DapperDataSession( databaseSession );
+			DapperDataSession session = new( databaseSession );
+
+			if( Transaction.Current is not null )
+				session.EnlistInAmbientTransaction( Transaction.Current );
+
+			return session;
 		}
 
 		protected override IEnumerable<SchemaVersion> InitializeUpgradeScripts()

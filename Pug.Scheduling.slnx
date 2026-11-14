@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/DataStores/">
+    <Project Path="src/Pug.Scheduling.Data.Dapper/Pug.Scheduling.Data.Dapper.csproj" />
     <Project Path="src/Pug.Scheduling.Data.Postgres/Pug.Scheduling.Data.Postgres.csproj" />
     <Project Path="src/Pug.Scheduling.Data.SQLite/Pug.Scheduling.Data.SQLite.csproj" />
   </Folder>

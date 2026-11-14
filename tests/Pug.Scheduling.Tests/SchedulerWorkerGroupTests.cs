@@ -338,6 +338,7 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabas
 										new DatabaseExecutionLeaseProvider( _leaseDatabase.ApplicationData ),
 										SecurityManagerFactory.CreateWithoutPrincipal(),
 										new ExecutionCoordinatorOptions(),
+										TimeProvider.System,
 										NullLogger<ExecutionCoordinator>.Instance ) );
 
 						DelegateJobHandlerFactory factory = new( _ => handler );

@@ -2,7 +2,7 @@ using System.Data;
 using System.Text.Json;
 using Dapper;
 
-namespace Pug.Scheduling.Data.Postgres
+namespace Pug.Scheduling.Data.Dapper
 {
 	// Stores an arbitrary reference-type value as a JSON text column and reads it back. Used for
 	// the ActionContext<Reference> / RunSummary / JobOutcome columns that are persisted as JSON.

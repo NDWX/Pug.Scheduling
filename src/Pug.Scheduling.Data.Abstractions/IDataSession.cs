@@ -9,15 +9,19 @@ namespace Pug.Scheduling.Data.Abstractions
 	// IExecutionCoordinator) and never by API consumers (they go through IScheduler). Methods are
 	// storage primitives: policy (authorization, validation, due-ness rules, misfire/retry
 	// decisions, next-occurrence computation) lives with the callers, which compose primitives
-	// into atomic units using the inherited transaction control. Execution leases are not this
-	// store's concern: they live behind IExecutionLeaseProvider, in their own storage.
+	// into atomic units of work (UnitsOfWork): every provider makes a unit one local transaction.
+	// Execution leases are not this store's concern: they live behind IExecutionLeaseProvider, in
+	// their own storage.
 	public interface IDataSession : IApplicationDataSession
 	{
 		// == Management operations (Scheduler facade) ==
 
 		Task InsertAsync( ScheduleInfo schedule );
 
-		Task<ScheduleInfo?> GetScheduleAsync( string identifier );
+		// lockRow holds the row's write lock until the unit of work ends, so the unit can act on
+		// what it read (a write unit only; Postgres 'for update'). SQLite needs no row lock: its
+		// write unit holds the database write lock from its first statement.
+		Task<ScheduleInfo?> GetScheduleAsync( string identifier, bool lockRow = false );
 
 		// Lists schedules within a domain, optionally filtered by owner principal and/or job
 		// type. Never crosses domains.

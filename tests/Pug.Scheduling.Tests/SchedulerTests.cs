@@ -28,14 +28,15 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 		_scheduler = CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ) );
 	}
 
-	private IScheduler CreateScheduler( ISecurityManager securityManager ) =>
+	private IScheduler CreateScheduler( ISecurityManager securityManager, TimeProvider? timeProvider = null ) =>
 		new Scheduler(
 				new SequentialIdGenerator( "schedule" ),
 				_scheduleDatabase.ApplicationData,
 				securityManager,
 				_leaseProvider,
 				new FakeJobTypeRegistry( "test" ),
-				new SchedulerOptions() );
+				new SchedulerOptions(),
+				timeProvider ?? TimeProvider.System );
 
 	private static ScheduleDefinition NewDefinition( string jobType = "test", string name = "Test schedule",
 													Recurrence? recurrence = null ) =>
@@ -49,6 +50,34 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 		};
 
 	private static Reference User( string identifier ) => new() { Type = "USER", Identifier = identifier };
+
+	// Every time the facade stamps comes from the injected clock: the next occurrence and the
+	// registration and update action contexts.
+	[Fact]
+	public async Task TimesComeFromTheInjectedClock()
+	{
+		DateTime registeredAt = new( 2031, 3, 4, 5, 6, 7, DateTimeKind.Utc );
+		ManualTimeProvider clock = new( registeredAt );
+		IScheduler scheduler = CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), clock );
+
+		string identifier = await scheduler.RegisterAsync( NewDefinition() );
+
+		ScheduleInfo registered = await scheduler.GetScheduleAsync( identifier );
+
+		Assert.Equal( registeredAt.AddHours( 1 ), registered.State.NextRun );
+		Assert.Equal( registeredAt, registered.Registration.Timestamp );
+
+		clock.Advance( TimeSpan.FromDays( 1 ) );
+
+		await scheduler.UpdateDefinitionAsync(
+				identifier,
+				NewDefinition( recurrence: new Recurrence { Interval = TimeSpan.FromHours( 2 ), TimeZone = "Etc/UTC" } ) );
+
+		ScheduleInfo updated = await scheduler.GetScheduleAsync( identifier );
+
+		Assert.Equal( registeredAt.AddDays( 1 ).AddHours( 2 ), updated.State.NextRun );
+		Assert.Equal( registeredAt.AddDays( 1 ), updated.LastUpdate!.Timestamp );
+	}
 
 	[Fact]
 	public async Task RegistrationPersistsDefinitionAppliesDefaultsAndComputesNextRun()

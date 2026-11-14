@@ -10,15 +10,21 @@ namespace Pug.Scheduling
 	{
 		protected IApplicationData<IDataSession> ApplicationDataProvider { get; }
 		protected ISecurityManager SecurityManager { get; }
+		protected TimeProvider TimeProvider { get; }
 
 		protected SchedulerBase( IApplicationData<IDataSession> applicationData,
-								ISecurityManager securityManager )
+								ISecurityManager securityManager,
+								TimeProvider timeProvider )
 		{
 			ApplicationDataProvider = applicationData ??
 									throw new ArgumentNullException( nameof(applicationData) );
 
 			SecurityManager = securityManager ?? throw new ArgumentNullException( nameof(securityManager) );
+
+			TimeProvider = timeProvider ?? throw new ArgumentNullException( nameof(timeProvider) );
 		}
+
+		protected DateTime UtcNow => TimeProvider.GetUtcNow().UtcDateTime;
 
 		protected string CurrentUserIdentifier => SecurityManager.CurrentPrincipal.Identity.Identifier;
 
@@ -26,7 +32,7 @@ namespace Pug.Scheduling
 			new()
 			{
 				Actor = new Reference { Type = "USER", Identifier = CurrentUserIdentifier },
-				Timestamp = DateTime.UtcNow
+				Timestamp = UtcNow
 			};
 
 		protected async Task CheckAuthorizationAsync( string operation, NounQualifier domainObject,

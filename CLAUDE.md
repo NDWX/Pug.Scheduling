@@ -24,8 +24,9 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
 | `Pug.Scheduling.Abstractions` | `IScheduler` (config only), `IExecutionCoordinator` (workers' ONLY surface), `IExecutionLeaseProvider`, `ISchedulerWorker` (one worker) / `ISchedulerWorkerRegistry` (the host's workers by number), `IJobPayloadValidator`, `IJobTypeRegistry`, `IdentifierGenerator`, options records, security constants (in Abstractions by user decision). |
 | `Pug.Scheduling.JobHandler.Abstractions` | `IScheduledJobHandler` (receives the timeout), `IScheduledJobHandlerFactory` (takes the context), `IScheduledJobHandlerFactoryRegistry` (null when none). Multi-target, depends on Models only. |
 | `Pug.Scheduling` | `Scheduler` facade (validation, defaults, owner-rule-then-ACL authz), `ExecutionCoordinator` (claim/misfire/retry/completion state machine), `RecurrenceCalculator` (Cronos). Both run every schedule-store unit in its own READ COMMITTED transaction (`RequiresNew`, D22): never rely on a read inside the same unit, and settle races with single-statement conditional writes. |
-| `Pug.Scheduling.Data.Abstractions` | Schedule-store `IDataSession` (no lease semantics; plain `GetDueSchedulesAsync`). |
-| `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores. **The Postgres session mirrors the SQLite session by hand.** It differs only by namespace, `enabled = 1 and paused = 0` → `enabled and not paused`, and SQLite's D18 UTC stamping on read (Postgres `timestamptz` needs none). Make every edit in both and keep them in sync. Do **not** regenerate Postgres with `sed`: that would copy the SQLite-only stamping across. SQLite units are **not atomic**: its connections do not enlist in the `TransactionScope`, so each statement commits on its own (D22). |
+| `Pug.Scheduling.Data.Abstractions` | Schedule-store `IDataSession` (no lease semantics; plain `GetDueSchedulesAsync`; `GetScheduleAsync( id, lockRow )`), and `UnitsOfWork` (`ReadAsync`/`WriteAsync`). |
+| `Pug.Scheduling.Data.Dapper` | `DapperDataSessionBase`: the schedule store's SQL, `ScheduleRow`, `Compose` and `JsonTypeHandler`, written once for every provider. Its dialect hooks are `EnabledNotPausedPredicate`, `LockingReadClause` and `ReadTimestamp`. |
+| `Pug.Scheduling.Data.Postgres` / `.SQLite` | Dapper schedule+run stores: **shared base + dialect overrides.** Each provider keeps a `DapperDataSession : DapperDataSessionBase` and its own `DapperData` (schema scripts). Postgres: `enabled and not paused`, `for update`, timestamps as stored. SQLite: `enabled = 1 and paused = 0`, no locking clause, D18 UTC stamping on read, and the session's own transaction enlistment (Conventions). SQL changes go in the base; a provider overrides only its dialect. |
 | `Pug.Scheduling.Leases[.Data.*]` | `DatabaseExecutionLeaseProvider` over its OWN store (conditional-upsert arbitration, each operation in its own READ COMMITTED transaction — D21). Lease state never touches the schedule table. |
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pure pump (poll → create handler → execute → dispose → heartbeat → report), one job at a time, constructed with its host-wide worker number and claiming as `( Claimant, number, JobType )`; pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. `WorkerOptions` (`Claimant` = machine name by default, `Workers`, `JobType`, intervals, `Validate()`); `SchedulerWorkerRegistry`. |
 | `Pug.Scheduling.Worker.DependencyInjection` | net10.0 worker-host DI: `AddSchedulingWorkers( options, coordinator )` — once per worker group; numbers 1..N host-wide in registration order (accumulator singleton), one `IHostedService` singleton per worker (never `AddHostedService`: it dedups), optional per-group coordinator factory, registers `ISchedulerWorkerRegistry`; `AddScheduledJobHandler<T>(jobType)` (keyed scoped, one DI scope per run), `AddScheduledJobHandlerFactory<T>`; internal registry and scoped-handler wrapper. References no `Pug.Scheduling`/Data/Leases. Handler registration does not mark a type schedulable. |
@@ -74,8 +75,15 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
 
 Tabs; block-scoped namespaces; spaces inside parens `Method( arg )`; `.ConfigureAwait( false )`
 in library code; `[DataContract]` records with the `#if NET5_0_OR_GREATER init/set` accessor
-pattern; data access via `ApplicationDataProvider.ExecuteAsync/PerformAsync( async ( session,
-context ) => …, context: new { … } )`; contracts multi-target `net6.0;net8.0;net10.0`,
+pattern; data access via `UnitsOfWork`: `ApplicationDataProvider.ReadAsync/WriteAsync( ( session,
+context ) => …, context: new { … } )`, which are `ExecuteAsync`/`PerformAsync` in a `RequiresNew` scope.
+`ReadAsync` runs at RepeatableRead, for pure reads; `WriteAsync` runs at ReadCommitted, for every
+unit that writes. A write unit that acts on what it read locks the row first (`lockRow`). Nothing in
+the domain layer begins or commits a transaction. **SQLite enlists itself** (the Pug.Sal pattern):
+Microsoft.Data.Sqlite ignores `TransactionScope`, so its `DapperData` enlists every session created in
+a scope. A write unit begins `IMMEDIATE`, taking the write lock up front, and a read unit begins
+deferred; both commit in phase one. Postgres must not copy this: Npgsql enlists natively.
+Contracts multi-target `net6.0;net8.0;net10.0`,
 implementations `net10.0`. Tests: xUnit, per-fixture databases migrated by DbUp from
 `GetSchemaUpgradeScripts()`; Moq only for `ISecurityManager`. Store-backed suites are abstract
 generics over `IScheduleDatabaseFixture`/`ILeaseDatabaseFixture` with a `Sqlite…` and a

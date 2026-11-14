@@ -41,13 +41,15 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase, TLeaseDatabas
 	}
 
 	private ExecutionCoordinator CreateCoordinator( string runPrefix, ISecurityManager securityManager,
-													ExecutionCoordinatorOptions? options = null ) =>
+													ExecutionCoordinatorOptions? options = null,
+													TimeProvider? timeProvider = null ) =>
 		new(
 				new SequentialIdGenerator( runPrefix ),
 				_scheduleDatabase.ApplicationData,
 				_leaseProvider,
 				securityManager,
 				options ?? new ExecutionCoordinatorOptions(),
+				timeProvider ?? TimeProvider.System,
 				NullLogger<ExecutionCoordinator>.Instance );
 
 	private async Task<string> InsertScheduleAsync( DateTime? nextRun, int attempt = 0,
@@ -152,6 +154,28 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase, TLeaseDatabas
 
 		// The lease is held by the individual worker, not by its group.
 		Assert.Equal( $"{Claimant}/1", ( await _leaseProvider.GetAsync( schedule ) ).ClaimedBy );
+	}
+
+	// Due-ness, the run's start and the claim's expiry follow the injected clock: a schedule due
+	// tomorrow by the system clock is claimed when the coordinator's clock says it is tomorrow.
+	[Fact]
+	public async Task ClaimTakesItsTimeFromTheInjectedClock()
+	{
+		DateTime due = DateTime.UtcNow.AddDays( 1 );
+		ManualTimeProvider clock = new( due.AddSeconds( 1 ) );
+		ExecutionCoordinator coordinator =
+			CreateCoordinator( "run-clock", SecurityManagerFactory.CreateAlwaysAuthorized( Claimant ), timeProvider: clock );
+
+		string schedule = await InsertScheduleAsync( due );
+
+		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 1, _jobType ) );
+
+		ClaimedJob? job = await coordinator.ClaimDueJobAsync( Claimant, 1, _jobType );
+
+		Assert.NotNull( job );
+		Assert.Equal( schedule, job.Context.Schedule );
+		Assert.Equal( clock.GetUtcNow().UtcDateTime + new ExecutionCoordinatorOptions().LeaseDuration, job.ClaimExpiry );
+		Assert.Equal( clock.GetUtcNow().UtcDateTime, Assert.Single( await GetRunsAsync( schedule ) ).Started, TimeSpan.FromMilliseconds( 1 ) );
 	}
 
 	[Fact]
@@ -891,7 +915,8 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase, TLeaseDatabas
 				SecurityManagerFactory.CreateAlwaysAuthorized( "owner-1" ),
 				_leaseProvider,
 				new FakeJobTypeRegistry( _jobType ),
-				new SchedulerOptions() );
+				new SchedulerOptions(),
+				TimeProvider.System );
 
 		List<string> failures = new();
 

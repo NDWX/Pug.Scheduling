@@ -1,404 +1,203 @@
 using System.Data;
-using Dapper;
-using Pug.Application.Data;
-using Pug.Effable;
-using Pug.Scheduling.Data.Abstractions;
-using Pug.Scheduling.Models;
+using System.Transactions;
+using Microsoft.Data.Sqlite;
+using Pug.Scheduling.Data.Dapper;
 
 namespace Pug.Scheduling.Data.SQLite
 {
-	public class DapperDataSession : ApplicationDataSession, IDataSession
+	// The SQLite dialect of the schedule store, plus the transaction enlistment Microsoft.Data.Sqlite
+	// lacks (ported from Pug.Sal, its DECISIONS D15/D19).
+	public class DapperDataSession : DapperDataSessionBase
 	{
-		static DapperDataSession()
-		{
-			SqlMapper.AddTypeHandler( new JsonTypeHandler<ActionContext<Reference>>() );
-			SqlMapper.AddTypeHandler( new JsonTypeHandler<RunSummary>() );
-			SqlMapper.AddTypeHandler( new JsonTypeHandler<JobOutcome>() );
-		}
-
 		public DapperDataSession( IDbConnection databaseSession ) : base( databaseSession )
 		{
 		}
 
-		// Flat row shape of the schedule table; composed into the sectioned ScheduleInfo model.
-		private sealed class ScheduleRow
-		{
-			public string identifier { get; set; } = null!;
-			public string domain { get; set; } = null!;
-			public string ownerType { get; set; } = null!;
-			public string owner { get; set; } = null!;
-			public string name { get; set; } = null!;
-			public string jobType { get; set; } = null!;
-			public string? payload { get; set; }
-			public string? cronExpression { get; set; }
-			public long? intervalSeconds { get; set; }
-			public string timeZone { get; set; } = null!;
-			public DateTime? notBefore { get; set; }
-			public DateTime? notAfter { get; set; }
-			public string misfireHandling { get; set; } = null!;
-			public long misfireThresholdSeconds { get; set; }
-			public int maxAttempts { get; set; }
-			public long retryBackoffSeconds { get; set; }
-			public long timeoutSeconds { get; set; }
-			public bool enabled { get; set; }
-			public bool paused { get; set; }
-			public DateTime? nextRun { get; set; }
-			public bool runRequested { get; set; }
-			public int attempt { get; set; }
-			public RunSummary? lastRun { get; set; }
-			public ActionContext<Reference> registration { get; set; } = null!;
-			public ActionContext<Reference>? lastUpdate { get; set; }
-		}
+		// == Dialect ==
 
-		private const string ScheduleColumns =
-			@"identifier, domain, ownerType, owner, name, jobType, payload, cronExpression, intervalSeconds,
-				timeZone, notBefore, notAfter, misfireHandling, misfireThresholdSeconds, maxAttempts,
-				retryBackoffSeconds, timeoutSeconds, enabled, paused, nextRun, runRequested, attempt, lastRun,
-				registration, lastUpdate";
+		// Booleans are stored as integers.
+		protected override string EnabledNotPausedPredicate => "enabled = 1 and paused = 0";
 
-		private const string RunColumns =
-			@"identifier, schedule, domain, scheduledFor, started, finished, attempt,
-				runTrigger as Trigger, result, outcome, claimedBy";
+		// A write unit is BEGIN IMMEDIATE, which already holds the database write lock; SQLite has
+		// no row locks (and no 'for update').
+		protected override string LockingReadClause => string.Empty;
 
 		// SQLite stores timestamps as ISO-8601 text without an offset, so the provider hands them
 		// back as DateTimeKind.Unspecified. Every time in this domain is UTC (and the Postgres
 		// provider's timestamptz columns say so), which makes stamping the kind on read the
 		// difference between the two providers agreeing and a consumer's ToLocalTime() silently
-		// shifting the value.
-		private static DateTime AsUtc( DateTime value ) => DateTime.SpecifyKind( value, DateTimeKind.Utc );
+		// shifting the value (DECISIONS D18).
+		protected override DateTime ReadTimestamp( DateTime stored ) => DateTime.SpecifyKind( stored, DateTimeKind.Utc );
 
-		private static DateTime? AsUtc( DateTime? value ) => value is null ? null : AsUtc( value.Value );
+		// == Ambient transaction enlistment ==
 
-		private static ScheduleRun? AsUtc( ScheduleRun? run ) =>
-			run is null
-				? null
-				: run with
-				{
-					ScheduledFor = AsUtc( run.ScheduledFor ),
-					Started = AsUtc( run.Started ),
-					Finished = AsUtc( run.Finished )
-				};
+		// Microsoft.Data.Sqlite ignores an ambient System.Transactions transaction: statements would
+		// autocommit, giving ApplicationData's TransactionScope-based ExecuteAsync/PerformAsync no
+		// atomicity and no write lock held across a unit of work. So the session opens a real SQLite
+		// transaction when created inside a scope and ties its commit/rollback to the scope's outcome.
+		//
+		// Which kind of SQLite transaction depends on the unit of work (UnitsOfWork):
+		// - A write (ReadCommitted, or any level other than below) is IMMEDIATE: it takes the write
+		//   lock at BEGIN, so writers queue up front instead of failing to upgrade a read lock, and a
+		//   read the unit then acts on cannot be invalidated by another writer.
+		// - A read (RepeatableRead or Snapshot) is DEFERRED: it takes no lock until its first read,
+		//   then sees one snapshot (in WAL mode) without blocking writers or other readers.
+		// Microsoft.Data.Sqlite begins IMMEDIATE for every level but ReadUncommitted, so the deferred
+		// transaction needs SqliteConnection's own overload, outside ApplicationDataSession's
+		// transaction chain.
+		private ScopeEnlistment? _enlistment;
 
-		private static ScheduleInfo Compose( ScheduleRow row ) =>
-			new()
+		private SqliteTransaction? _deferred;
+
+		internal void EnlistInAmbientTransaction( Transaction transaction )
+		{
+			if( IsRead( transaction.IsolationLevel ) && Connection is SqliteConnection connection )
+				_deferred = connection.BeginTransaction( deferred: true );
+			else
+				BeginTransaction();
+
+			_enlistment = new ScopeEnlistment( this );
+			transaction.EnlistVolatile( _enlistment, EnlistmentOptions.None );
+		}
+
+		private static bool IsRead( System.Transactions.IsolationLevel level ) =>
+			level is System.Transactions.IsolationLevel.RepeatableRead or System.Transactions.IsolationLevel.Snapshot;
+
+		private void CommitEnlisted()
+		{
+			if( _deferred is null )
 			{
-				Identifier = row.identifier,
-				Owner = new Reference { Type = row.ownerType, Identifier = row.owner },
-				Definition = new ScheduleDefinition
+				CommitTransaction();
+
+				return;
+			}
+
+			_deferred.Commit();
+			_deferred.Dispose();
+			_deferred = null;
+		}
+
+		private void RollbackEnlisted()
+		{
+			if( _deferred is null )
+			{
+				RollbackTransaction();
+
+				return;
+			}
+
+			try
+			{
+				_deferred.Rollback();
+			}
+			finally
+			{
+				_deferred.Dispose();
+				_deferred = null;
+			}
+		}
+
+		// ApplicationData disposes the session before the scope completes, so while an enlisted
+		// transaction is still pending, closing the connection is left to the enlistment.
+		public override void Dispose()
+		{
+			if( _enlistment is not null && !_enlistment.Completed )
+			{
+				_enlistment.DisposeRequested = true;
+				return;
+			}
+
+			base.Dispose();
+		}
+
+		private sealed class ScopeEnlistment : IEnlistmentNotification
+		{
+			private readonly DapperDataSession _session;
+
+			public ScopeEnlistment( DapperDataSession session )
+			{
+				_session = session;
+			}
+
+			public bool Completed { get; private set; }
+
+			public bool DisposeRequested { get; set; }
+
+			private bool _committed;
+
+			// The SQLite transaction is committed here, in phase one, not in Commit: a commit that
+			// fails (e.g. SQLITE_BUSY) must abort the scope so its Dispose throws, rather than surface
+			// after the scope has already reported success. Committing in phase one cannot be undone
+			// if another participant of the same scope then fails; the schedule store's units of work
+			// (UnitsOfWork, RequiresNew) enlist nothing else.
+			public void Prepare( PreparingEnlistment preparingEnlistment )
+			{
+				try
 				{
-					Domain = row.domain,
-					Name = row.name,
-					JobType = row.jobType,
-					Payload = row.payload,
-					Recurrence = new Recurrence
-					{
-						CronExpression = row.cronExpression,
-						Interval = row.intervalSeconds is null
-										? null
-										: TimeSpan.FromSeconds( row.intervalSeconds.Value ),
-						TimeZone = row.timeZone,
-						NotBefore = AsUtc( row.notBefore ),
-						NotAfter = AsUtc( row.notAfter )
-					},
-					MisfirePolicy = new MisfirePolicy
-					{
-						Handling = row.misfireHandling,
-						Threshold = TimeSpan.FromSeconds( row.misfireThresholdSeconds )
-					},
-					RetryPolicy = new RetryPolicy
-					{
-						MaximumAttempts = row.maxAttempts,
-						Backoff = TimeSpan.FromSeconds( row.retryBackoffSeconds )
-					},
-					Timeout = TimeSpan.FromSeconds( row.timeoutSeconds )
-				},
-				State = new ScheduleState
+					_session.CommitEnlisted();
+				}
+				catch( Exception exception )
 				{
-					Enabled = row.enabled,
-					Paused = row.paused,
-					NextRun = AsUtc( row.nextRun ),
-					RunRequested = row.runRequested,
-					Attempt = row.attempt,
-					LastRun = row.lastRun
-				},
-				Registration = row.registration,
-				LastUpdate = row.lastUpdate
-			};
-
-		public Task InsertAsync( ScheduleInfo schedule )
-		{
-			return Connection.ExecuteAsync(
-					$@"insert into schedule({ScheduleColumns})
-						values(@identifier, @domain, @ownerType, @owner, @name, @jobType, @payload, @cronExpression,
-							@intervalSeconds, @timeZone, @notBefore, @notAfter, @misfireHandling,
-							@misfireThresholdSeconds, @maxAttempts, @retryBackoffSeconds, @timeoutSeconds,
-							@enabled, @paused, @nextRun, @runRequested, @attempt, @lastRun, @registration, @lastUpdate);",
-					new
+					try
 					{
-						identifier = schedule.Identifier,
-						domain = schedule.Definition.Domain,
-						ownerType = schedule.Owner.Type,
-						owner = schedule.Owner.Identifier,
-						name = schedule.Definition.Name,
-						jobType = schedule.Definition.JobType,
-						payload = schedule.Definition.Payload,
-						cronExpression = schedule.Definition.Recurrence.CronExpression,
-						intervalSeconds = schedule.Definition.Recurrence.Interval is null
-											? (long?)null
-											: (long)schedule.Definition.Recurrence.Interval.Value.TotalSeconds,
-						timeZone = schedule.Definition.Recurrence.TimeZone,
-						notBefore = schedule.Definition.Recurrence.NotBefore,
-						notAfter = schedule.Definition.Recurrence.NotAfter,
-						misfireHandling = schedule.Definition.MisfirePolicy.Handling,
-						misfireThresholdSeconds = (long)schedule.Definition.MisfirePolicy.Threshold.TotalSeconds,
-						maxAttempts = schedule.Definition.RetryPolicy.MaximumAttempts,
-						retryBackoffSeconds = (long)schedule.Definition.RetryPolicy.Backoff.TotalSeconds,
-						timeoutSeconds = (long)schedule.Definition.Timeout.TotalSeconds,
-						enabled = schedule.State.Enabled,
-						paused = schedule.State.Paused,
-						nextRun = schedule.State.NextRun,
-						runRequested = schedule.State.RunRequested,
-						attempt = schedule.State.Attempt,
-						lastRun = schedule.State.LastRun,
-						registration = schedule.Registration,
-						lastUpdate = schedule.LastUpdate
+						_session.RollbackEnlisted();
 					}
-				);
-		}
-
-		public async Task<ScheduleInfo?> GetScheduleAsync( string identifier )
-		{
-			ScheduleRow? row = await Connection.QueryFirstOrDefaultAsync<ScheduleRow?>(
-									$"select {ScheduleColumns} from schedule where identifier = @identifier;",
-									new { identifier }
-								).ConfigureAwait( false );
-
-			return row is null ? null : Compose( row );
-		}
-
-		public async Task<IEnumerable<ScheduleInfo>> GetSchedulesAsync( string domain, Reference? owner = null,
-																		string? jobType = null )
-		{
-			string filter = "domain = @domain";
-
-			if( owner is not null )
-				filter += " and owner = @owner";
-
-			if( jobType is not null )
-				filter += " and jobType = @jobType";
-
-			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
-													$"select {ScheduleColumns} from schedule where {filter} order by name;",
-													new { domain, owner = owner?.Identifier, jobType }
-												).ConfigureAwait( false );
-
-			return rows.Select( Compose ).ToList();
-		}
-
-		public Task UpdateDefinitionAsync( string schedule, ScheduleDefinition definition, DateTime? nextRun,
-											ActionContext<Reference> lastUpdate )
-		{
-			return Connection.ExecuteAsync(
-					@"update schedule set
-							name = @name, jobType = @jobType, payload = @payload,
-							cronExpression = @cronExpression, intervalSeconds = @intervalSeconds,
-							timeZone = @timeZone, notBefore = @notBefore, notAfter = @notAfter,
-							misfireHandling = @misfireHandling, misfireThresholdSeconds = @misfireThresholdSeconds,
-							maxAttempts = @maxAttempts, retryBackoffSeconds = @retryBackoffSeconds,
-							timeoutSeconds = @timeoutSeconds, nextRun = @nextRun, lastUpdate = @lastUpdate
-						where identifier = @identifier;",
-					new
+					catch
 					{
-						identifier = schedule,
-						name = definition.Name,
-						jobType = definition.JobType,
-						payload = definition.Payload,
-						cronExpression = definition.Recurrence.CronExpression,
-						intervalSeconds = definition.Recurrence.Interval is null
-											? (long?)null
-											: (long)definition.Recurrence.Interval.Value.TotalSeconds,
-						timeZone = definition.Recurrence.TimeZone,
-						notBefore = definition.Recurrence.NotBefore,
-						notAfter = definition.Recurrence.NotAfter,
-						misfireHandling = definition.MisfirePolicy.Handling,
-						misfireThresholdSeconds = (long)definition.MisfirePolicy.Threshold.TotalSeconds,
-						maxAttempts = definition.RetryPolicy.MaximumAttempts,
-						retryBackoffSeconds = (long)definition.RetryPolicy.Backoff.TotalSeconds,
-						timeoutSeconds = (long)definition.Timeout.TotalSeconds,
-						nextRun,
-						lastUpdate
+						// The commit failure is the error worth reporting.
 					}
-				);
-		}
 
-		public async Task DeleteAsync( string schedule )
-		{
-			// Run history goes with the schedule; explicit deletes rather than relying on
-			// provider-specific foreign-key cascade enforcement.
-			await Connection.ExecuteAsync(
-						"delete from scheduleRun where schedule = @schedule;", new { schedule } )
-					.ConfigureAwait( false );
+					Release();
+					preparingEnlistment.ForceRollback( exception );
 
-			await Connection.ExecuteAsync(
-						"delete from schedule where identifier = @schedule;", new { schedule } )
-					.ConfigureAwait( false );
-		}
+					return;
+				}
 
-		public Task SetPausedAsync( string schedule, bool paused )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set paused = @paused where identifier = @schedule;",
-					new { schedule, paused }
-				);
-		}
+				_committed = true;
+				preparingEnlistment.Prepared();
+			}
 
-		public Task UpdateNextRunAsync( string schedule, DateTime? nextRun )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set nextRun = @nextRun, runRequested = @runRequested where identifier = @schedule;",
-					new { schedule, nextRun, runRequested = false }
-				);
-		}
+			public void Commit( Enlistment enlistment ) => Finish( enlistment );
 
-		public Task RequestRunAsync( string schedule, DateTime requestedTime )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set nextRun = @requestedTime, runRequested = @runRequested where identifier = @schedule;",
-					new { schedule, requestedTime, runRequested = true }
-				);
-		}
+			public void Rollback( Enlistment enlistment ) => Abandon( enlistment );
 
-		public Task ClearRunRequestAsync( string schedule )
-		{
-			return Connection.ExecuteAsync(
-					"update schedule set runRequested = @runRequested where identifier = @schedule;",
-					new { schedule, runRequested = false }
-				);
-		}
+			public void InDoubt( Enlistment enlistment ) => Abandon( enlistment );
 
-		public async Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules )
-		{
-			// Two statements rather than '@jobType is null or jobType = @jobType': a null
-			// parameter carries no type, which Npgsql rejects, and the unfiltered read keeps the
-			// plain due-index plan.
-			string sql = jobType is null
-							? $@"select {ScheduleColumns} from schedule
-									where enabled = 1 and paused = 0
-										and nextRun is not null and nextRun <= @dueBy
-									order by nextRun
-									limit @maximumSchedules;"
-							: $@"select {ScheduleColumns} from schedule
-									where enabled = 1 and paused = 0
-										and jobType = @jobType
-										and nextRun is not null and nextRun <= @dueBy
-									order by nextRun
-									limit @maximumSchedules;";
+			private void Abandon( Enlistment enlistment )
+			{
+				try
+				{
+					if( !_committed )
+						_session.RollbackEnlisted();
+				}
+				finally
+				{
+					Finish( enlistment );
+				}
+			}
 
-			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
-													sql, new { dueBy, jobType, maximumSchedules }
-												).ConfigureAwait( false );
+			private void Finish( Enlistment enlistment )
+			{
+				try
+				{
+					Release();
+				}
+				finally
+				{
+					enlistment.Done();
+				}
+			}
 
-			return rows.Select( Compose ).ToList();
-		}
+			private void Release()
+			{
+				if( Completed )
+					return;
 
-		public Task InsertRunAsync( ScheduleRun run )
-		{
-			return Connection.ExecuteAsync(
-					@"insert into scheduleRun(identifier, schedule, domain, scheduledFor, started, finished,
-							attempt, runTrigger, result, outcome, claimedBy)
-						values(@identifier, @schedule, @domain, @scheduledFor, @started, @finished,
-							@attempt, @trigger, @result, @outcome, @claimedBy);",
-					new
-					{
-						identifier = run.Identifier,
-						schedule = run.Schedule,
-						domain = run.Domain,
-						scheduledFor = run.ScheduledFor,
-						started = run.Started,
-						finished = run.Finished,
-						attempt = run.Attempt,
-						trigger = run.Trigger,
-						result = run.Result,
-						outcome = run.Outcome,
-						claimedBy = run.ClaimedBy
-					}
-				);
-		}
+				Completed = true;
 
-		public async Task<ScheduleRun?> GetRunAsync( string identifier )
-		{
-			return AsUtc(
-					await Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
-									$"select {RunColumns} from scheduleRun where identifier = @identifier;",
-									new { identifier }
-								)
-								.ConfigureAwait( false )
-				);
-		}
-
-		public async Task<ScheduleRun?> GetLatestRunAsync( string schedule )
-		{
-			return AsUtc(
-					await Connection.QueryFirstOrDefaultAsync<ScheduleRun?>(
-									$@"select {RunColumns} from scheduleRun where schedule = @schedule
-										order by started desc limit 1;",
-									new { schedule }
-								)
-								.ConfigureAwait( false )
-				);
-		}
-
-		public async Task<bool> ClaimRunAsync( string run, string claimedBy )
-		{
-			int updated = await Connection.ExecuteAsync(
-									"update scheduleRun set claimedBy = @claimedBy where identifier = @run and finished is null;",
-									new { run, claimedBy }
-								).ConfigureAwait( false );
-
-			return updated > 0;
-		}
-
-		public async Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result,
-												JobOutcome? outcome )
-		{
-			int updated = await Connection.ExecuteAsync(
-									@"update scheduleRun set finished = @finished, result = @result, outcome = @outcome
-										where identifier = @run and finished is null
-											and (claimedBy = @claimedBy or claimedBy is null);",
-									new { run, claimedBy, finished, result, outcome }
-								).ConfigureAwait( false );
-
-			return updated > 0;
-		}
-
-		public Task RecordOccurrenceCompletionAsync( string schedule, int attempt, DateTime? nextRun,
-													RunSummary lastRun )
-		{
-			return Connection.ExecuteAsync(
-					@"update schedule set attempt = @attempt, nextRun = @nextRun, lastRun = @lastRun,
-							runRequested = @runRequested
-						where identifier = @schedule;",
-					new { schedule, attempt, nextRun, lastRun, runRequested = false }
-				);
-		}
-
-		public async Task<IEnumerable<ScheduleRun>> GetRunsAsync( string schedule, DateTime? from = null,
-																DateTime? to = null )
-		{
-			string filter = "schedule = @schedule";
-
-			if( from is not null )
-				filter += " and started >= @from";
-
-			if( to is not null )
-				filter += " and started <= @to";
-
-			IEnumerable<ScheduleRun> runs = await Connection.QueryAsync<ScheduleRun>(
-													$"select {RunColumns} from scheduleRun where {filter} order by started desc;",
-													new { schedule, from, to }
-												).ConfigureAwait( false );
-
-			return runs.Select( run => AsUtc( run )! ).ToList();
+				if( DisposeRequested )
+					_session.Dispose();
+			}
 		}
 	}
 }
