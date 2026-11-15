@@ -334,7 +334,7 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 										_scheduleDatabase.ApplicationData,
 										SecurityManagerFactory.CreateWithoutPrincipal(),
 										new ExecutionCoordinatorOptions(),
-										TimeProvider.System,
+										new TimeProviderClock( TimeProvider.System ),
 										NullLogger<ExecutionCoordinator>.Instance ) );
 
 						DelegateJobHandlerFactory factory = new( _ => handler );

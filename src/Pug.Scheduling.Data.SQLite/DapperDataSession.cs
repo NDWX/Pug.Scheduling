@@ -24,6 +24,12 @@ namespace Pug.Scheduling.Data.SQLite
 		// no row locks (and no 'for update').
 		protected override string LockingReadClause => string.Empty;
 
+		// UTC to the millisecond, SQLite's finest ('%f' is seconds with three decimals), as text like
+		// the stored timestamps; ReadTimestamp stamps it UTC like them. 'now' is evaluated per
+		// statement, not fixed for the transaction. SQLite runs in the host's process, so this is
+		// the host's clock: a SQLite store is single-host in practice.
+		protected override string CurrentTimeExpression => "strftime('%Y-%m-%d %H:%M:%f', 'now')";
+
 		// SQLite stores timestamps as ISO-8601 text without an offset, so the provider hands them
 		// back as DateTimeKind.Unspecified. Every time in this domain is UTC (and the Postgres
 		// provider's timestamptz columns say so), which makes stamping the kind on read the

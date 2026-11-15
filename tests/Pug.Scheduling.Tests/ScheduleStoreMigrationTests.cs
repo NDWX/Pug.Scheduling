@@ -96,7 +96,7 @@ public abstract class ScheduleStoreMigrationTests
 			// The lapsed run is adopted by the next claim: same run, no second record.
 			ExecutionCoordinator coordinator = new(
 					new SequentialIdGenerator( "migrated" ), store, SecurityManagerFactory.CreateWithoutPrincipal(),
-					new ExecutionCoordinatorOptions(), new ManualTimeProvider( Now ),
+					new ExecutionCoordinatorOptions(), new TimeProviderClock( new ManualTimeProvider( Now ) ),
 					NullLogger<ExecutionCoordinator>.Instance );
 
 			ClaimedJob? job = await coordinator.ClaimDueJobAsync( "upgraded", 1, "running-type" );

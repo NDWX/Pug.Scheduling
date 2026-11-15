@@ -16,7 +16,9 @@ namespace Pug.Scheduling
 		// caller's transaction. Authorization is decided on a read of the schedule (its owner and
 		// domain never change); a write that depends on the schedule's state — run-now, a
 		// definition update, a delete — locks the row in its own unit and decides on what it locked
-		// (InLockedUnitAsync), the coordinator's lock-decide-write shape.
+		// (InLockedUnitAsync), the coordinator's lock-decide-write shape. A unit that needs the time
+		// reads it from the clock inside the unit, after its lock (ISchedulingClock); run-now, pause
+		// and delete decide nothing by time.
 
 		private readonly IdentifierGenerator _identifierGenerator;
 		private readonly IJobTypeRegistry _jobTypeRegistry;
@@ -27,8 +29,8 @@ namespace Pug.Scheduling
 						ISecurityManager securityManager,
 						IJobTypeRegistry jobTypeRegistry,
 						SchedulerOptions options,
-						TimeProvider timeProvider )
-			: base( applicationDataProvider, securityManager, timeProvider )
+						ISchedulingClock clock )
+			: base( applicationDataProvider, securityManager, clock )
 		{
 			_identifierGenerator = identifierGenerator ??
 									throw new ArgumentNullException( nameof(identifierGenerator) );
@@ -174,27 +176,37 @@ namespace Pug.Scheduling
 							SecurityOperations.CreateOnBehalf, ResourceQualifiers.Principal( definition.Domain, owner ) )
 					.ConfigureAwait( false );
 
-			ScheduleInfo schedule = new()
-			{
-				Identifier = _identifierGenerator.GetNext(),
-				Definition = definition,
-				Owner = owner,
-				State = new ScheduleState
-				{
-					Enabled = true,
-					Paused = false,
-					NextRun = RecurrenceCalculator.GetFirstOccurrence( definition.Recurrence, UtcNow ),
-					Attempt = 0
-				},
-				Registration = CreateActionContext()
-			};
+			string identifier = _identifierGenerator.GetNext();
 
+			// The first occurrence and the registration stamp are taken at the clock's time in the
+			// inserting unit.
 			await ApplicationDataProvider.WriteAsync(
-						( session, context ) => session.InsertAsync( context.schedule ),
-						context: new { schedule }
+						async ( session, context ) =>
+						{
+							DateTime now = await Clock.GetUtcNowAsync( session ).ConfigureAwait( false );
+
+							await session.InsertAsync(
+											new ScheduleInfo
+											{
+												Identifier = context.identifier,
+												Definition = context.definition,
+												Owner = context.owner,
+												State = new ScheduleState
+												{
+													Enabled = true,
+													Paused = false,
+													NextRun = RecurrenceCalculator.GetFirstOccurrence(
+															context.definition.Recurrence, now ),
+													Attempt = 0
+												},
+												Registration = CreateActionContext( now )
+											} )
+										.ConfigureAwait( false );
+						},
+						context: new { identifier, definition, owner }
 					).ConfigureAwait( false );
 
-			return schedule.Identifier;
+			return identifier;
 		}
 
 		public async Task<IEnumerable<ScheduleInfo>> GetSchedulesAsync( string domain, Reference owner = null,
@@ -244,14 +256,20 @@ namespace Pug.Scheduling
 			if( definition.Domain != existing.Definition.Domain )
 				throw new ArgumentException( "Schedule domain cannot be changed.", nameof(definition) );
 
-			// The next occurrence is decided on the locked row, so a completion committed since the
-			// read above is never reverted. A run in progress, a pending retry and a run request are
-			// left as they are.
+			// The next occurrence is decided on the locked row, at the clock's time once it is locked,
+			// so a completion committed since the read above is never reverted. A run in progress, a
+			// pending retry and a run request are left as they are.
 			await InLockedUnitAsync(
 						identifier,
-						( session, locked ) => session.UpdateDefinitionAsync(
-								identifier, definition, DefinitionRules.NextRunAfterUpdate( locked, definition, UtcNow ),
-								CreateActionContext() )
+						async ( session, locked ) =>
+						{
+							DateTime now = await Clock.GetUtcNowAsync( session ).ConfigureAwait( false );
+
+							await session.UpdateDefinitionAsync(
+											identifier, definition, DefinitionRules.NextRunAfterUpdate( locked, definition, now ),
+											CreateActionContext( now ) )
+										.ConfigureAwait( false );
+						}
 					).ConfigureAwait( false );
 		}
 

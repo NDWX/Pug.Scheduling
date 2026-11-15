@@ -9,7 +9,8 @@ namespace Pug.Scheduling.Data.Dapper
 {
 	// The schedule store's SQL and row mapping, shared by every Dapper provider. A provider
 	// subclasses it with its dialect: the boolean predicates (written as in its partial indexes),
-	// the clause that locks a row read, and how stored timestamps are read back. Everything else - statements,
+	// the clause that locks a row read, its current-time expression, and how stored timestamps are
+	// read back. Everything else - statements,
 	// parameters, the flat row shape and its composition into ScheduleInfo - is written once
 	// here. The schema scripts stay with each provider's DapperData.
 	//
@@ -40,6 +41,11 @@ namespace Pug.Scheduling.Data.Dapper
 		// Appended to a row read that must hold the row's write lock until the unit ends, or empty
 		// when the provider's write unit already serializes writers (SQLite's BEGIN IMMEDIATE).
 		protected abstract string LockingReadClause { get; }
+
+		// SQL expression for the database's current time at the best precision it offers, read at
+		// evaluation rather than fixed at transaction start (see IDataSession.GetCurrentTimeAsync).
+		// Its value is mapped by ReadTimestamp like a stored timestamp.
+		protected abstract string CurrentTimeExpression { get; }
 
 		// Maps a timestamp as the provider returns it to the UTC DateTime the domain uses
 		// (DECISIONS D12, D18). The identity by default, for providers whose column type carries
@@ -165,6 +171,12 @@ namespace Pug.Scheduling.Data.Dapper
 		// The definition columns' parameter values, shared by insert and definition update.
 		private static long? IntervalSeconds( Recurrence recurrence ) =>
 			recurrence.Interval is null ? null : (long)recurrence.Interval.Value.TotalSeconds;
+
+		// == Clock ==
+
+		public async Task<DateTime> GetCurrentTimeAsync() =>
+			ReadTimestamp(
+				await Connection.ExecuteScalarAsync<DateTime>( $"select {CurrentTimeExpression};" ).ConfigureAwait( false ) );
 
 		// == Schedules ==
 

@@ -30,7 +30,7 @@ public abstract class SchedulerTests<TScheduleDatabase>
 				securityManager,
 				new FakeJobTypeRegistry( "test" ),
 				new SchedulerOptions(),
-				timeProvider ?? TimeProvider.System );
+				new TimeProviderClock( timeProvider ?? TimeProvider.System ) );
 
 	private static ScheduleDefinition NewDefinition( string jobType = "test", string name = "Test schedule",
 													Recurrence? recurrence = null ) =>
@@ -305,7 +305,7 @@ public abstract class SchedulerTests<TScheduleDatabase>
 						new SequentialIdGenerator( "schedule" ), _scheduleDatabase.ApplicationData,
 						SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), new FakeJobTypeRegistry( "test" ),
 						new SchedulerOptions { DefaultTimeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) },
-						TimeProvider.System ) );
+						new TimeProviderClock( TimeProvider.System ) ) );
 
 		Assert.Equal( "options", exception.ParamName );
 	}

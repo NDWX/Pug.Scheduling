@@ -19,5 +19,9 @@ namespace Pug.Scheduling.Data.Postgres
 		// Holds the row's lock until the unit's transaction ends, so a read the unit then acts on
 		// cannot be overtaken by a concurrent writer under READ COMMITTED.
 		protected override string LockingReadClause => "for update";
+
+		// clock_timestamp(), not now(): now() is the transaction's start, which a unit that waited
+		// on a row lock has long passed. Microsecond precision, timestamptz, so it comes back UTC.
+		protected override string CurrentTimeExpression => "clock_timestamp()";
 	}
 }

@@ -1,3 +1,4 @@
+using Dapper;
 using DbUp;
 using Microsoft.Data.Sqlite;
 using Pug.Application.Data;
@@ -13,6 +14,7 @@ namespace Pug.Scheduling.Tests.Infrastructure;
 public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IAsyncLifetime
 {
 	private string? _dbPath;
+	private string? _connectionString;
 	private bool _disposed;
 
 	public IApplicationData<IDataSession> ApplicationData { get; private set; } = null!;
@@ -23,6 +25,8 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 
 		// Pooling=False ensures each connection is physically closed when disposed.
 		string connectionString = $"Data Source={_dbPath};Pooling=False;";
+
+		_connectionString = connectionString;
 
 		DapperData data = new( connectionString, SqliteFactory.Instance );
 
@@ -37,6 +41,17 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 	{
 		Cleanup();
 		return Task.CompletedTask;
+	}
+
+	// Milliseconds since the Unix epoch from SQLite's Julian day, rather than the store's strftime text.
+	public async Task<DateTime> SelectCurrentTimeAsync()
+	{
+		await using SqliteConnection connection = new( _connectionString );
+
+		double milliseconds = await connection.ExecuteScalarAsync<double>(
+				"select (julianday('now') - 2440587.5) * 86400000.0;" );
+
+		return DateTime.UnixEpoch.AddMilliseconds( milliseconds );
 	}
 
 	private static void UpgradeDatabase( string connectionString, DapperData data )
