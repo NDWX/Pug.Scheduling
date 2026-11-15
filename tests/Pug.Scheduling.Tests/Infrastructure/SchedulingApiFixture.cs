@@ -15,6 +15,7 @@ using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.DependencyInjection;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Routing;
 using Pug.Scheduling.WebApi;
 using Pug.Scheduling.Worker.WebApi;
 
@@ -39,21 +40,35 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 	private readonly SchedulerWorkerEndpointOptions? _workerOptions;
 	private readonly Action<AuthorizationOptions>? _configureAuthorization;
 
+	// Conventions the host adds to every API's returned route group (AllowAnonymous(), say).
+	private readonly Action<RouteGroupBuilder>? _configureGroups;
+
 	public SchedulingApiFixture()
 	{
 	}
 
 	// For the suites that host the APIs under a custom base path or policies.
 	internal SchedulingApiFixture( SchedulingEndpointOptions? scheduling, ExecutionCoordinatorEndpointOptions? coordinator,
-									SchedulerWorkerEndpointOptions? workers, Action<AuthorizationOptions>? configureAuthorization )
+									SchedulerWorkerEndpointOptions? workers, Action<AuthorizationOptions>? configureAuthorization,
+									Action<RouteGroupBuilder>? configureGroups = null )
 	{
 		_schedulingOptions = scheduling;
 		_coordinatorOptions = coordinator;
 		_workerOptions = workers;
 		_configureAuthorization = configureAuthorization;
+		_configureGroups = configureGroups;
 	}
 
+	/// <summary>
+	/// An authenticated caller the host's security manager maps to no principal — as a host's
+	/// <see cref="ISecurityManager"/> might for a valid token whose subject it does not know.
+	/// </summary>
+	internal const string UnmappedUser = "unmapped-user";
+
 	internal TestAuthorizations Authorizations { get; } = new();
+
+	// The endpoints the host mapped, for tests that read the authorization metadata of the APIs.
+	internal IReadOnlyList<Endpoint> Endpoints => _host.Services.GetRequiredService<EndpointDataSource>().Endpoints;
 
 	// Claimants of the two hosted fake workers: management grants are per claimant, so each can be
 	// granted without the other.
@@ -117,7 +132,9 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		services.AddSingleton<IApplicationData<IDataSession>>( _scheduleDatabase.ApplicationData );
 
 		// Resolves the calling principal from the current request, so a single registration
-		// serves every caller in the authorization matrix.
+		// serves every caller in the authorization matrix. Like a typical host's, it maps an
+		// unauthenticated request to no principal — what the coordinator would take for an
+		// in-process caller, were such a request let through — and so does it UnmappedUser.
 		services.AddSingleton<ISecurityManager>(
 				provider =>
 				{
@@ -125,7 +142,9 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 
 					return SecurityManagerFactory.CreateContextual(
 							() => httpContextAccessor.HttpContext?.User.Identity?.Name ?? string.Empty,
-							Authorizations.IsGranted
+							Authorizations.IsGranted,
+							() => httpContextAccessor.HttpContext?.User.Identity is { IsAuthenticated: true, Name: var name } &&
+								name != UnmappedUser
 						);
 				} );
 
@@ -151,9 +170,15 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		app.UseEndpoints(
 				endpoints =>
 				{
-					endpoints.MapSchedulingEndpoints( _schedulingOptions );
-					endpoints.MapExecutionCoordinatorEndpoints( _coordinatorOptions );
-					endpoints.MapSchedulerWorkerEndpoints( _workerOptions );
+					RouteGroupBuilder[] groups =
+					{
+						endpoints.MapSchedulingEndpoints( _schedulingOptions ),
+						endpoints.MapExecutionCoordinatorEndpoints( _coordinatorOptions ),
+						endpoints.MapSchedulerWorkerEndpoints( _workerOptions )
+					};
+
+					foreach( RouteGroupBuilder group in groups )
+						_configureGroups?.Invoke( group );
 				}
 			);
 	}

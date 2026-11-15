@@ -2,7 +2,7 @@
 
 What `MapSchedulingEndpoints()` serves, for callers that don't use `SchedulerClient`. Routes are relative to the API's base path: `schedules` by default, or the host's `SchedulingEndpointOptions.BasePath`, plus any prefix the host mounts it under.
 
-Every route requires an authenticated caller (401 otherwise), or the authorization policies the host configured for the API. A refused policy is 403. Beyond that gate, every grant decision is the scheduler's (see "Permissions" in the skill).
+Every route requires an authenticated caller (401 otherwise) whom the host maps to a principal (403 otherwise), plus the authorization policies the host configured for the API (its default policy when it configured none). A refused policy is 403. Beyond that gate, every grant decision is the scheduler's (see "Permissions" in the skill).
 
 | Route | Input | Success | Failure |
 |---|---|---|---|

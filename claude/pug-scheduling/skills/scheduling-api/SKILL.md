@@ -171,7 +171,7 @@ catch( RunInProgressException e )
 
 ## Permissions
 
-`Scheduler` authorizes every call through the host's `ISecurityManager`. Over HTTP the endpoints authorize nothing themselves: they require an authenticated caller (or the host's policies) and translate the outcome.
+`Scheduler` authorizes every call through the host's `ISecurityManager`. Over HTTP the endpoints authorize nothing themselves: they require an authenticated caller with a principal (plus any policies of the host's) and translate the outcome.
 
 **Owner rule:** when the schedule's `Owner` is `{ Type = "USER", Identifier = <the caller's identifier> }`, the caller may read, update, delete, pause, resume, run and read the history of it with no grant. Everyone else needs the operation below. Schedules owned by a principal of any other type (a group, a service) are reachable only through grants. The one exception is listing: see `LIST` below.
 

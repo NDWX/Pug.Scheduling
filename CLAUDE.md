@@ -30,8 +30,8 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
 | `Pug.Scheduling.Worker` | `SchedulerWorker : BackgroundService` — pump (poll → create handler → execute off the pump → heartbeat → dispose → report), **one attended job at a time**: a handler that ignores cancellation is cancelled, given `CancellationGrace`, then **detached** (reported TIMED_OUT, or abandoned without a report on claim loss/shutdown) and disposed when its task ends; at `MaxDetachedHandlers` the worker stops claiming. On shutdown, with the handler stopped (never detached, never claim lost), it releases its claim via `AbandonClaimAsync` (best effort, bounded by `AbandonTimeout`; D27). Constructed with its host-wide worker number and claiming as `( Claimant, number, JobType )`; pause/resume via `ISchedulerWorker`, fully defensive against third-party handlers. `WorkerOptions` (`Claimant` = machine name by default, `Workers`, `JobType`, `PollInterval`, `HeartbeatInterval`, `CancellationGrace` = 10 s, `MaxDetachedHandlers` = 2, `AbandonTimeout` = 5 s, `Validate()` incl. `TimerBounds`); `SchedulerWorkerRegistry`. |
 | `Pug.Scheduling.Worker.DependencyInjection` | net10.0 worker-host DI: `AddSchedulingWorkers( options, coordinator )` — once per worker group; numbers 1..N host-wide in registration order (accumulator singleton), one `IHostedService` singleton per worker (never `AddHostedService`: it dedups), optional per-group coordinator factory, registers `ISchedulerWorkerRegistry`; `AddScheduledJobHandler<T>(jobType)` (keyed scoped, one DI scope per run), `AddScheduledJobHandlerFactory<T>`; internal registry and scoped-handler wrapper. References no `Pug.Scheduling`/Data. Handler registration does not mark a type schedulable. |
 | `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `RunInProgressResultInfo` (the 409 body of a refused run-now), `JobRunClaimRequest`, `JobRunCompletion`, `ApiBasePaths` (default base paths and their normalization, shared by servers and clients). Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
-| `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…` — claims, `leaseRenewal`, `abandonment`, `completion` — the out-of-process worker transport; operations `CLAIM_JOBS`, `RENEW_CLAIM`, `ABANDON_CLAIM`, `REPORT_COMPLETION`). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Each takes optional `SchedulingEndpointOptions` / `ExecutionCoordinatorEndpointOptions` (`BasePath`, `AuthorizationPolicies`; D28), maps under a `RouteGroupBuilder` it returns, and applies the policy (default: authenticated) once on the group. Targets `net8.0;net10.0` (`MapGroup`); references only Abstractions/Models. |
-| `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`workers`, `workers/{worker}`, `workers/{worker}/pause|resume`; the list shows only workers whose claimant the caller may view); takes `SchedulerWorkerEndpointOptions` likewise. Targets `net8.0;net10.0`. Its own package so an out-of-process worker host references nothing it does not need. |
+| `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…` — claims, `leaseRenewal`, `abandonment`, `completion` — the out-of-process worker transport; operations `CLAIM_JOBS`, `RENEW_CLAIM`, `ABANDON_CLAIM`, `REPORT_COMPLETION`). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Each takes optional `SchedulingEndpointOptions` / `ExecutionCoordinatorEndpointOptions` (`BasePath`, `AuthorizationPolicies`; D28), maps under a `RouteGroupBuilder` it returns, and applies `ApiAccess.RequireAuthenticatedPrincipal` once on the group (the host's policies or `DefaultPolicy`, plus the authenticated-caller-with-principal filter, which needs `ISecurityManager` in DI). Targets `net8.0;net10.0` (`MapGroup`); references only Abstractions/Models. |
+| `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`workers`, `workers/{worker}`, `workers/{worker}/pause|resume`; the list shows only workers whose claimant the caller may view); takes `SchedulerWorkerEndpointOptions` likewise; compiles WebApi's `ApiAccess.cs` as a linked source file rather than referencing that package. Targets `net8.0;net10.0`. Its own package so an out-of-process worker host references nothing it does not need. |
 | `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes (optional `basePath`, default from `ApiBasePaths`; D28); reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions, WebApi.Models, `Pug.HttpApiClient` and `Pug.Application.Security.Abstractions` — a worker host must not pull in ASP.NET. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling` (also `TryAddSingleton<ISchedulingClock, DatabaseClock>`: a host's own `ISchedulingClock` wins, a registered `TimeProvider` does not), `AddJobPayloadValidator<T>`, `AddSchedulableJobType`. |
 
@@ -66,17 +66,24 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
   attends a single job at once; a handler that ignores cancellation is detached (it may overlap its own
   retry) and counted in `DetachedJobs`.
 - All times UTC; cron in the recurrence's IANA time zone via Cronos.
-- Endpoints make no grant decisions — the facades do. The group requires authentication, or the host's
-  policies for that API (a transport gate: who may call it at all, D28). `Scheduler` runs owner-rule-then-ACL;
+- Endpoints make no grant decisions — the facades do. The group applies the host's policies for that
+  API, or its `DefaultPolicy` when none are given (a transport gate: who may call it at all, D28), and
+  always requires an authenticated caller with a principal. `Scheduler` runs owner-rule-then-ACL;
   `ExecutionCoordinator` checks `CoordinatorSecurityOperations` qualified by **claimant identity**
   (never in the endpoints: an in-process worker must be held to the same grants as a remote one).
-  Endpoints only require authentication (or those policies) and map `NotAuthorized`/`Unknown*Exception`/
+  Endpoints only require an authenticated caller with a principal (always, plus those policies)
+  and map `NotAuthorized`/`Unknown*Exception`/
   `ArgumentException` to 403/404/400 (and `ClaimNotHeldException`/`RunInProgressException` to
   409). The lone exception is worker management, whose
   `ISchedulerWorker` has no facade behind it.
-- The coordinator skips the check when `ISecurityManager` reports no principal: only in-process
-  callers can reach it that way, since endpoints reject unauthenticated requests before dispatch.
-  An in-process worker needs no service identity. `Scheduler` still requires a principal — it
+- The coordinator skips the check when `ISecurityManager` reports no principal. Under no
+  supported configuration does a call through the `Map…Endpoints` reach it that way: every API
+  group carries an endpoint filter (`ApiAccess`) that refuses an unauthenticated caller (401) or
+  one `ISecurityManager` maps to no principal (403), whatever the policies admit and even under
+  `.AllowAnonymous()`. Policies: no names → the host's `DefaultPolicy`; names → an inline
+  authenticated-user policy **plus** the named ones. The filter makes no grant decision; do not
+  regress it. Any other transport in front of the coordinator (a host's controller, gRPC, a
+  message consumer) must establish a principal itself, or every coordinator grant is skipped. An in-process worker needs no service identity. `Scheduler` still requires a principal — it
   derives `Owner` and audit contexts from it.
 - Every HTTP surface contract belongs in `Pug.Scheduling.WebApi.Models` — not in Models (they
   describe the transport, not the domain) and not in a `.WebApi` package (a worker host's client

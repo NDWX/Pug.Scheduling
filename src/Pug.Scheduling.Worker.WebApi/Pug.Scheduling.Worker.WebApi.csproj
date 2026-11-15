@@ -32,4 +32,10 @@
 		<ProjectReference Include="../Pug.Scheduling.WebApi.Models/Pug.Scheduling.WebApi.Models.csproj" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<!-- The transport gate all three APIs share (#34). Linked as source, not referenced: a worker
+		     host must not depend on Pug.Scheduling.WebApi (D15). The type is internal to each assembly. -->
+		<Compile Include="../Pug.Scheduling.WebApi/ApiAccess.cs" Link="ApiAccess.cs" />
+	</ItemGroup>
+
 </Project>

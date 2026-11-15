@@ -164,14 +164,11 @@ The facades and the worker management endpoints ask `ISecurityManager.CurrentPri
 - **The facades are singletons**, so `CurrentPrincipal` must resolve the *current* caller each time it is read. `SecurityManager` does this through its `IPrincipalIdentityAccessor`.
 - **The caller's identity** is `CurrentPrincipal.Identity.Identifier`. The `Scheduler` records it as `{ Type = "USER", Identifier }` on `Registration` / `LastUpdate`, and uses that as the default `Owner`, whatever kind of principal the caller is.
 - **The `Scheduler` requires a principal.** It reads the caller's identity on every call, so a call without one fails. Background code that manages schedules must run under an explicit identity.
-- **The coordinator skips its check when `CurrentPrincipal` is null** (current behaviour, issue #34). It treats a null principal as an in-process caller. An in-process worker therefore needs no identity or grants. **But** an `ISecurityManager` that returns a non-null principal for background work (an anonymous or "system" principal) is *checked*, and that principal must hold the coordinator grants.
-- **That trust holds only if no request reaches the coordinator endpoints with a null principal.** A remote caller bypasses every coordinator grant when:
-  - one of your `AuthorizationPolicies` doesn't require an authenticated user (policies given **replace** the default policy);
-  - with no policies given, your `AuthorizationOptions.DefaultPolicy` doesn't require one;
-  - something calls `.AllowAnonymous()` on the returned route group;
-  - the caller is authenticated but your `ISecurityManager` can't map it to a principal and returns null.
-
-  Every policy that guards the coordinator must require authentication, and your `ISecurityManager` must return a principal for every authenticated request.
+- **The coordinator skips its check when `CurrentPrincipal` is null.** It treats a null principal as an in-process caller. An in-process worker therefore needs no identity or grants. **But** an `ISecurityManager` that returns a non-null principal for background work (an anonymous or "system" principal) is *checked*, and that principal must hold the coordinator grants.
+- **Under no supported configuration does a request through the mapped endpoints reach a facade with a null principal.** Every API group carries an endpoint filter that runs whatever your policies admit (a permissive `DefaultPolicy` included) and even under `.AllowAnonymous()` on the returned group. It challenges an unauthenticated caller (401) and forbids an authenticated caller your `ISecurityManager` maps to no principal (403, logged as a warning).
+  - Your `ISecurityManager` must return a principal for every authenticated request, or those callers get 403.
+  - **Register `ISecurityManager` in every host that maps the scheduling or coordinator endpoints**, a gateway included: the filter resolves it, and without it every request is a 500.
+- **Warning: any other transport in front of the coordinator must establish the principal itself.** Your own controller, a gRPC service or a message consumer calling `IExecutionCoordinator` gets none of the above. The coordinator takes a call without a principal for an in-process one, so every coordinator grant is skipped for that transport's callers.
 
 What is checked (constants in `Pug.Scheduling.Abstractions`: `SecurityOperations`, `CoordinatorSecurityOperations`, `WorkerSecurityOperations`, `SecurityObjectTypes`; the qualifiers are built by `Pug.Scheduling.ResourceQualifiers`):
 
@@ -201,14 +198,14 @@ app.MapExecutionCoordinatorEndpoints( new ExecutionCoordinatorEndpointOptions
 
 - **Options** (`SchedulingEndpointOptions`, `ExecutionCoordinatorEndpointOptions`, both in `Pug.Scheduling.WebApi`):
   - `BasePath` defaults to `schedules` or `executionCoordinator`. Leading and trailing `/` are ignored.
-  - `AuthorizationPolicies` defaults to empty, which applies the default policy (an authenticated caller). Policies given are all required.
+  - `AuthorizationPolicies` defaults to empty, which applies your `DefaultPolicy`. Policies given are all required, together with an authenticated user; your `DefaultPolicy` is then not applied.
   - An empty base path or a blank policy name throws `ArgumentException` when mapping. An unregistered policy fails at request time.
 - **The return value** is the endpoints' `RouteGroupBuilder`, for further conventions (rate limiting, CORS, OpenAPI). To mount under a further prefix, map onto a group: `app.MapGroup( "api" ).MapSchedulingEndpoints()`.
-- **A policy is a transport gate, not the grant decision.** It decides who may call the API at all, and it replaces the default policy, so it must itself require an authenticated user (see "Security", issue #34). The facades still check every grant above, for in-process callers too. Keep the two consistent: a policy that admits a caller the provider refuses only moves the 403 later.
+- **A policy is a transport gate, not the grant decision.** It narrows who may call the API at all. Whatever it admits, the filter still requires an authenticated caller with a principal (see "Security"). The facades still check every grant above, for in-process callers too. Keep the two consistent: a policy that admits a caller the provider refuses only moves the 403 later.
 - **Clients take the same base path:** `new SchedulerClient( httpApiClient, "api/scheduling/schedules" )`, `new ExecutionCoordinatorClient( httpApiClient, basePath )`. A mismatch shows up as 404.
 - **OpenAPI:** every endpoint carries a name, a tag and its response types. The library serves no document itself.
 
-Routes, relative to each base path. With policies that require authentication (the default), an unauthenticated caller gets **401**; a refused policy or grant is **403**. Use a bearer or API-key scheme for these endpoints: a cookie scheme turns 401 and 403 into redirects to a login page.
+Routes, relative to each base path. An unauthenticated caller gets **401**; an authenticated caller with no principal, a refused policy or a refused grant is **403**. Use a bearer or API-key scheme for these endpoints: a cookie scheme turns 401 and 403 into redirects to a login page.
 
 | Route | Success | Errors |
 |---|---|---|
@@ -252,7 +249,9 @@ These combine: several scheduler or coordinator hosts on one Postgres store are 
 - **Migrating without `RunGroupOrder`.** DbUp then applies scripts in name order, which is not guaranteed to be script order. Apply `GetSchemaUpgradeScripts()` in the order given, and use a journal of the store's own when the database is shared.
 - **SQLite shared by several hosts.** Each host's clock judges the others' leases, and they contend for one write lock. Use Postgres.
 - **A "system" principal for background work.** An in-process worker running under a non-null principal is checked against the coordinator grants, and every claim fails until that principal is granted them. Return null outside requests, or grant it.
-- **Letting a null principal reach the coordinator endpoints** (issue #34). A policy or default policy that doesn't require authentication, `.AllowAnonymous()` on the group, or an `ISecurityManager` returning null for an authenticated caller lets a remote caller skip every coordinator grant.
+- **An `ISecurityManager` that returns null for an authenticated caller.** The endpoints answer 403 to every such request. Map each authenticated caller to a principal.
+- **Your own transport in front of the coordinator.** Calls that don't come through `MapExecutionCoordinatorEndpoints` reach it as in-process calls: without a principal, they skip every grant.
+- **Mapping the endpoints without `ISecurityManager` in DI.** Every request is a 500. A gateway that maps them needs one too.
 - **Cookie authentication on the API.** Its 401 and 403 become redirects, which the clients can't map back to exceptions. Authenticate the endpoints with a bearer or API-key scheme.
 - **Authorizing on the operation alone.** `GET_INFO`, `PAUSE` and `RESUME` are both schedule and worker operations. Match on the resource type as well.
 - **Expecting a `TimeProvider` registration to move the facades' clock.** It doesn't; register `ISchedulingClock`.

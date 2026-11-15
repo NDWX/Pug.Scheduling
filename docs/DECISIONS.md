@@ -296,7 +296,7 @@ segment is the default of a host-configurable base path, and each surface takes 
   claimant the grant is qualified by is the worker's, so an authenticated caller can learn which
   numbers exist, nothing more.
 - **Authorization stays with the facades** (see D16). Schedule and coordinator endpoints perform
-  none of their own; they require an authenticated caller and map outcomes: `NotAuthorized` → 403,
+  none of their own; they require an authenticated caller with a principal (D28, #34) and map outcomes: `NotAuthorized` → 403,
   `UnknownScheduleException`/`UnknownRunException` → 404, `ClaimNotHeldException` → 409 (completion
   only), `RunInProgressException` → 409 with a `RunInProgressResultInfo` body (run route only;
   amended in #10), `ArgumentException` → 400 `BadRequestResultInfo`. Worker management endpoints remain the one exception —
@@ -320,9 +320,9 @@ segment is the default of a host-configurable base path, and each surface takes 
 ## D16 — The execution coordinator authorizes its own callers (user correction)
 
 Authorization for `IExecutionCoordinator` lives **inside `ExecutionCoordinator`**, not in the
-coordinator endpoints where it was first placed. Keeping it in the facade means it cannot be
-bypassed by binding the coordinator differently — the HTTP layer would only have guarded the one
-transport it happens to serve. Each operation requires its `CoordinatorSecurityOperations` grant
+coordinator endpoints where it was first placed. Keeping it in the facade holds every transport
+to the same grants — the HTTP layer would only have guarded the one transport it happens to serve.
+(Every transport that presents a principal, that is: see the amendment below on calls without one.) Each operation requires its `CoordinatorSecurityOperations` grant
 on `SecurityObjectTypes.ExecutionCoordinator` qualified by the **claimant identity being acted
 as** (`ResourceQualifiers.ExecutionCoordinator`), so one worker's credentials cannot claim, renew,
 or complete runs as another. There is no owner rule: execution is an operator concern, not the
@@ -369,6 +369,23 @@ in-process caller. An in-process `SchedulerWorker` therefore needs no service id
 no grants — its `BackgroundService` polls simply run outside any authenticated request. Hosts
 should note the corollary: an `ISecurityManager` that manufactures a non-null anonymous or system
 principal for background contexts will be *checked*, not skipped, and must then be granted.
+
+**Amended (#34): the trust is kept, for in-process calls only.** Since D28 a host's policies had
+replaced the default policy, so a permissive policy or `DefaultPolicy`, `.AllowAnonymous()` on the
+returned group, or an `ISecurityManager` mapping an authenticated caller to no principal let a
+remote call reach the coordinator without one and skip every grant. Under no supported
+configuration does a call through the `Map…Endpoints` now reach a facade without a principal: an
+endpoint filter on every API group — which runs whatever the policies admit, and even under
+`.AllowAnonymous()` — refuses an unauthenticated caller (challenge, 401) and an authenticated one
+the host's `ISecurityManager` maps to no principal (403: the credentials are valid, so
+authenticating again cannot help). Named host policies are also added to an always-required
+authenticated user (D28). The filter makes no grant decision.
+
+**Warning — other transports.** The coordinator cannot tell a call that crossed a transport from
+an in-process one; it sees only whether there is a principal. Any transport a host binds the
+coordinator to other than `MapExecutionCoordinatorEndpoints` — its own controller, a gRPC service, a
+message consumer — must establish the caller's principal before calling it, or every coordinator
+grant is skipped for its callers. The warning is repeated on `IExecutionCoordinator`.
 (`Scheduler` is unaffected and still requires a principal — it derives schedule `Owner` and audit
 contexts from it.)
 
@@ -744,10 +761,24 @@ host may also gate each API with its own authorization policies.
 - **Defaults live once** in `Pug.Scheduling.WebApi.Models` (`ApiBasePaths`), with the one
   normalization (`Normalize`: trim `/`, non-empty) that server options and clients share, so a client
   and a server given the same base path agree.
-- **Each Map method makes a `RouteGroupBuilder`** on the base path, applies `RequireAuthorization()`
-  (or the policies) once on the group and maps endpoints relative to it; it **returns the group** so
-  the host can add conventions. The per-endpoint `RequireAuthorization()` calls are gone.
-- **The policy is a transport gate, not a grant decision.** It decides who may call the API at all;
+- **Each Map method makes a `RouteGroupBuilder`** on the base path, applies the authorization once
+  on the group and maps endpoints relative to it; it **returns the group** so the host can add
+  conventions. The per-endpoint `RequireAuthorization()` calls are gone.
+- **Amended (#34): an authenticated caller with a principal is required whatever the policies.**
+  With no `AuthorizationPolicies` the group applies the host's `DefaultPolicy`, as before:
+  displacing it would silently drop a stricter one (a required scope claim) and break one bound to a
+  non-default authentication scheme. With names, the group requires an inline authenticated-user
+  policy (`RequireAuthenticatedUser`) and the named policies, all of which must pass, so a
+  permissive named policy cannot admit an anonymous caller; as with any policy object, the
+  `DefaultPolicy` is then not applied. Either way the group carries an endpoint filter refusing a
+  caller without authentication (401) or without a principal from `ISecurityManager` (403), whatever
+  the policies admit — a permissive `DefaultPolicy` included — and even under `.AllowAnonymous()`.
+  The filter resolves `ISecurityManager`, so a host mapping these APIs must register one; without
+  it every request is a 500. Both live once
+  in `Pug.Scheduling.WebApi`'s internal `ApiAccess`, compiled into `Pug.Scheduling.Worker.WebApi` as a
+  linked source file, so the worker host still references no server package of the scheduler (D15).
+  This is what D16's trust in a missing principal rests on.
+- **The policy is a transport gate, not a grant decision.** It narrows who may call the API at all;
   the facades (`Scheduler`, `ExecutionCoordinator`) and, for worker management, the endpoint handlers
   still enforce the ACL grants (D16, D20), so an in-process caller is held to the same rules.
 - **Clients** take an optional `basePath` (default from `ApiBasePaths`), normalized and validated alike.

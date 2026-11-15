@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Routing;
 using Pug.Application.Security;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi;
 using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.Worker.WebApi;
@@ -23,8 +24,13 @@ public static class SchedulerWorkerEndpoints
 	/// <see cref="WorkerSecurityOperations"/> grant on
 	/// <see cref="SecurityObjectTypes.SchedulerWorker"/> qualified by the worker's claimant
 	/// identity. There is no owner exemption — worker management is an operator concern.
-	/// The group requires an authenticated caller, or the policies of
-	/// <see cref="SchedulerWorkerEndpointOptions.AuthorizationPolicies"/>, in addition.
+	/// The group also requires an authenticated caller whom the host's
+	/// <see cref="ISecurityManager"/> maps to a principal, plus the policies of
+	/// <see cref="SchedulerWorkerEndpointOptions.AuthorizationPolicies"/> (the host's
+	/// <c>DefaultPolicy</c> when it sets none);
+	/// neither a host policy nor <c>AllowAnonymous()</c> on the returned group lifts that (401
+	/// without authentication, 403 without a principal), so the grant checks below always have a
+	/// principal to ask.
 	/// Returns the endpoints' route group so the host can add further conventions to them.
 	/// </summary>
 	public static RouteGroupBuilder MapSchedulerWorkerEndpoints( this IEndpointRouteBuilder routes,
@@ -37,16 +43,9 @@ public static class SchedulerWorkerEndpoints
 		// WorkerSecurityOperations grant, because ISchedulerWorker performs none of its own.
 		RouteGroupBuilder group = routes.MapGroup( ApiBasePaths.Normalize( options.BasePath, nameof(options.BasePath) ) );
 
-		// No policies (null or empty) means the default policy: authenticated callers only.
-		IReadOnlyList<string> policies = options.AuthorizationPolicies ?? Array.Empty<string>();
-
-		if( policies.Any( string.IsNullOrWhiteSpace ) )
-			throw new ArgumentException( "Authorization policy names must not be blank.", nameof(options) );
-
-		if( policies.Count == 0 )
-			group.RequireAuthorization();
-		else
-			group.RequireAuthorization( policies.ToArray() );
+		// An authenticated user is always required, whatever the host's policies; they are added
+		// to it, not substituted for it.
+		ApiAccess.RequireAuthenticatedPrincipal( group, options.AuthorizationPolicies, nameof(options) );
 
 		group.MapGet( "", GetWorkers )
 			.WithName( "GetSchedulerWorkers" )

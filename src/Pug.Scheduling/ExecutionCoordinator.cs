@@ -23,11 +23,14 @@ namespace Pug.Scheduling
 	// coordinator hosts judge due-ness, misfires and lease expiry by the database's one clock, so
 	// skew between their own clocks cannot let one adopt a live run early.
 	//
-	// Authorization lives here rather than in any hosting surface, so it cannot be bypassed by
-	// binding the coordinator differently. Every call carrying a security principal requires the
-	// corresponding CoordinatorSecurityOperations grant on the claimant identity being acted as,
-	// which is what keeps one worker from claiming, renewing, or completing runs as another;
-	// calls with no principal at all are in-process by construction and are trusted.
+	// Authorization lives here rather than in any hosting surface, so every transport is held to
+	// the same grants. Every call carrying a security principal requires the corresponding
+	// CoordinatorSecurityOperations grant on the claimant identity being acted as, which is what
+	// keeps one worker from claiming, renewing, or completing runs as another. A call with no
+	// principal at all is taken for an in-process one and trusted (D16). That trust is only as
+	// good as the transport in front: MapExecutionCoordinatorEndpoints never lets a call through
+	// without a principal, but any other transport a host binds the coordinator to (its own
+	// controller, gRPC, a message consumer) must establish one itself, or every grant is skipped.
 	//
 	// Leases are held per worker, as "claimant/worker": grants belong to the group (claimant),
 	// exclusivity to the individual worker. A worker restarted under the same claimant and
@@ -97,10 +100,13 @@ namespace Pug.Scheduling
 		// Grants are qualified by the claimant identity being acted as; there is no owner rule
 		// here — execution is an operator concern, not the schedule owner's.
 		//
-		// The absence of a principal identifies an in-process caller and is trusted: every
-		// endpoint in front of the coordinator requires an authenticated caller before dispatch,
-		// so a call that crossed a transport always arrives with a principal and is always
-		// checked. A worker hosted in-process therefore needs no service identity of its own.
+		// The absence of a principal identifies an in-process caller and is trusted. Under no
+		// supported configuration does a call through MapExecutionCoordinatorEndpoints arrive
+		// without one: their endpoint filter refuses a caller without authentication or without a
+		// principal, whatever the policies admit and even under AllowAnonymous() (D16, D28). Such a
+		// call is therefore always checked. A transport of the host's own in front of the
+		// coordinator gets no such guarantee (see the class comment). A worker hosted in-process
+		// needs no service identity.
 		private async Task CheckAuthorizationAsync( string operation, Caller caller )
 		{
 			if( _securityManager.CurrentPrincipal is null )
