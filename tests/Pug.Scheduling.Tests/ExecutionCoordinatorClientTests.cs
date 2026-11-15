@@ -201,6 +201,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 					HeartbeatInterval = TimeSpan.FromSeconds( 30 )
 				},
 				1,
+				TimeProvider.System,
 				NullLogger<Worker.SchedulerWorker>.Instance );
 
 		await worker.StartAsync( CancellationToken.None );

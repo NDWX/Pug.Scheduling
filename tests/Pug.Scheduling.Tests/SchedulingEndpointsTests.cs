@@ -147,6 +147,19 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
+	public async Task TimeoutBeyondTheTimerBoundIsRejectedAsBadRequest()
+	{
+		using HttpClient client = _fixture.CreateClient( Owner );
+
+		ScheduleDefinition definition = NewDefinition() with { Timeout = TimeSpan.FromDays( 60 ) };
+
+		HttpResponseMessage response =
+			await client.PostAsync( "/schedules", SchedulingApiFixture.JsonContent( definition ) );
+
+		Assert.Equal( HttpStatusCode.BadRequest, response.StatusCode );
+	}
+
+	[Fact]
 	public async Task ListingRequiresDomain()
 	{
 		using HttpClient client = _fixture.CreateClient( Owner );
@@ -322,13 +335,40 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 
 		HttpResponseMessage response = await client.PostAsync( $"/schedules/{identifier}/run", null );
 
-		// Accepted, not Ok: the occurrence is only brought forward for a worker to claim.
+		// Accepted, not Ok: the request is only recorded for a worker to claim.
 		Assert.Equal( HttpStatusCode.Accepted, response.StatusCode );
 
 		ScheduleInfo schedule =
 			await SchedulingApiFixture.ReadAsync<ScheduleInfo>( await client.GetAsync( $"/schedules/{identifier}" ) );
 
 		Assert.True( schedule.State.RunRequested );
+	}
+
+	[Fact]
+	public async Task RunNowDuringARunIsAConflictAndRecordsNothing()
+	{
+		string identifier = await RegisterAsync( Owner );
+
+		await _fixture.MarkRunInProgressAsync( identifier );
+
+		using HttpClient client = _fixture.CreateClient( Owner );
+
+		HttpResponseMessage response = await client.PostAsync( $"/schedules/{identifier}/run", null );
+
+		Assert.Equal( HttpStatusCode.Conflict, response.StatusCode );
+
+		RunInProgressResultInfo body = await SchedulingApiFixture.ReadAsync<RunInProgressResultInfo>( response );
+
+		ScheduleInfo schedule =
+			await SchedulingApiFixture.ReadAsync<ScheduleInfo>( await client.GetAsync( $"/schedules/{identifier}" ) );
+
+		Assert.False( schedule.State.RunRequested );
+		Assert.Equal( "elsewhere/1", schedule.ExecutionLease.ClaimedBy );
+
+		Assert.Equal( identifier, body.Schedule );
+		Assert.Equal( schedule.ExecutionLease.Run, body.Run );
+		Assert.Equal( "elsewhere/1", body.Holder );
+		Assert.Equal( schedule.ExecutionLease.Expiry, body.LeaseExpiry );
 	}
 
 	[Fact]

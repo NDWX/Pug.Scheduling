@@ -14,15 +14,13 @@ using Pug.HttpApiClient;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.DependencyInjection;
-using Pug.Scheduling.Leases;
 using Pug.Scheduling.WebApi;
 using Pug.Scheduling.Worker.WebApi;
 
 namespace Pug.Scheduling.Tests.Infrastructure;
 
 /// <summary>
-/// Hosts the scheduling endpoints over a TestServer against real SQLite schedule and lease
-/// stores, wired through the production DI extensions — so endpoint tests exercise the same
+/// Hosts the scheduling endpoints over a TestServer against a real SQLite schedule store, wired through the production DI extensions — so endpoint tests exercise the same
 /// composition a host would use, with only the security principal and the workers faked.
 /// </summary>
 public sealed class SchedulingApiFixture : IAsyncLifetime
@@ -31,7 +29,6 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 	internal const string Domain = "tenant-1";
 
 	private readonly SqliteScheduleDatabaseFixture _scheduleDatabase = new();
-	private readonly SqliteLeaseDatabaseFixture _leaseDatabase = new();
 
 	private IHost _host = null!;
 
@@ -50,10 +47,22 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 
 	internal static JsonSerializerOptions JsonOptions { get; } = new( JsonSerializerDefaults.Web );
 
+	// Puts a run of the schedule in progress directly in the store (no worker needed): the state in
+	// which run-now is refused.
+	internal Task MarkRunInProgressAsync( string schedule ) =>
+		_scheduleDatabase.ApplicationData.WriteAsync(
+				( session, context ) => session.SetExecutionAsync(
+						context,
+						new Models.ExecutionLease
+						{
+							Run = $"run-in-progress-{Guid.NewGuid():N}", ClaimedBy = "elsewhere/1",
+							Expiry = DateTime.UtcNow.AddMinutes( 2 )
+						} ),
+				schedule );
+
 	public async Task InitializeAsync()
 	{
 		await _scheduleDatabase.InitializeAsync();
-		await _leaseDatabase.InitializeAsync();
 
 		_host = await new HostBuilder()
 					.ConfigureWebHost(
@@ -70,7 +79,6 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		await _host.StopAsync();
 		_host.Dispose();
 
-		await _leaseDatabase.DisposeAsync();
 		await _scheduleDatabase.DisposeAsync();
 	}
 
@@ -86,9 +94,6 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		services.AddAuthorization();
 
 		services.AddSingleton<IApplicationData<IDataSession>>( _scheduleDatabase.ApplicationData );
-
-		services.AddSingleton<IExecutionLeaseProvider>(
-				new DatabaseExecutionLeaseProvider( _leaseDatabase.ApplicationData ) );
 
 		// Resolves the calling principal from the current request, so a single registration
 		// serves every caller in the authorization matrix.

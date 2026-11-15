@@ -71,8 +71,23 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
+		// Jobs the worker is attending (executing, heartbeating and awaiting). Handlers it detached
+		// are not counted here but in DetachedJobs.
 		[Required, DataMember( IsRequired = true )]
 		public int ActiveJobs
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// Handlers the worker detached because they did not stop within its cancellation grace,
+		// still running unattended. At its limit the worker stops claiming.
+		[Required, DataMember( IsRequired = true )]
+		public int DetachedJobs
 		{
 			get;
 #if NET5_0_OR_GREATER

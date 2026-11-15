@@ -52,8 +52,9 @@ overrode the Corea precedent (core project): consumer-usable constants belong wi
 
 ## D4 — Role separation: IScheduler configures, IExecutionCoordinator executes
 
-`IScheduler` is configuration/observation only — run-now never executes anything, it calls
-`IDataSession.RequestRunAsync` (moves `NextRun` + raises `RunRequested`). Resume only lifts the
+`IScheduler` is configuration/observation only — run-now never executes anything, it raises the
+`RunRequested` marker (originally `IDataSession.RequestRunAsync`, which also moved `NextRun`; D10 and
+D23: the marker never moves `NextRun`). Resume only lifts the
 pause; elapsed occurrences are evaluated against the misfire policy by the coordinator at claim.
 
 ## D5 — Workers never touch the data backend (user directive)
@@ -81,7 +82,16 @@ job-type filter is a separate SQL statement, not `@jobType is null or …` (an u
 parameter is rejected by Npgsql), served by the schema-v2 partial index
 `ixScheduleJobTypeDue on schedule(jobType, nextRun)`.
 
-## D6 — Lease claiming is its own abstraction with its own store (user directive)
+**Amended (#10, D23/D25):** the store read is now `GetDueCandidatesAsync( now, holder, jobType, max )`,
+a coarse pre-filter that returns identifiers; exclusivity is the schedule row's lock, not a lease
+race, and the candidate loop isolates failures (D23). "One job at a time" is "one *attended* job at
+a time": a handler that ignores cancellation is detached and the worker moves on (D25). The
+indexes are the schema-v3 ones (`activeRun is null` partial predicates).
+
+## D6 — Lease claiming is its own abstraction with its own store (user directive) — SUPERSEDED by D23
+
+Historical: the lease provider and the `Pug.Scheduling.Leases*` projects were removed in #10; the
+lease now lives on the schedule row (D23).
 
 `IExecutionLeaseProvider { TryAcquireAsync( schedule, claimant, expiry ), RenewAsync,
 ReleaseAsync, GetAsync }` in Abstractions. Implementation (in-memory, database — same or
@@ -106,6 +116,11 @@ likewise an unsuccessful outcome; handler disposal failures are logged and never
 worker-classification `Result` string (`RunResults`): TIMED_OUT and SKIPPED runs never reach the
 handler, so they have no handler outcome.
 
+**Amended (#10, D25):** "never trusts cancellation" now has a mechanism: a handler that does not
+finish within `CancellationGrace` of being cancelled is detached, and the worker moves on. A detached
+handler may still be running when its occurrence is retried (or adopted by another worker), so it
+may overlap its own retry; handlers must key side effects on `(Schedule, ScheduledFor)`.
+
 ## D8 — Task<T> + documented exceptions, not Pug.Lang Result
 
 `Pug.Lang.Result<T>` is a plain value wrapper (no error channel), and `ICorea` — the newest
@@ -115,12 +130,17 @@ precedent — uses `Task<T>` with exceptions (`UnknownScheduleException`, `Unkno
 ## D9 — Retry identity and at-least-once bookkeeping
 
 Side-effect idempotency keys on `(Schedule, ScheduledFor)`: retries re-execute the **original**
-occurrence (carried via `IDataSession.GetLatestRunAsync`), backoff = `Backoff * 2^(retry-1)` from
+occurrence (originally carried via `IDataSession.GetLatestRunAsync`; see the amendment), backoff = `Backoff * 2^(retry-1)` from
 now; exhausted retries record terminal failure and advance. A crashed worker's unfinished run is
 **adopted** on re-claim (same run row) instead of inserting a duplicate — which keeps the
 `(schedule, scheduledFor, attempt)` unique index honest under at-least-once. Reporting for a
 deleted schedule surfaces as `UnknownRunException` (delete removes run history; a mid-flight
 run's completion is recorded nowhere, per `IScheduler.DeleteAsync` contract).
+
+**Amended (#10, D23):** the retry's occurrence is carried on the schedule row (`occurrence`, non-null
+only while `attempt > 0`), so no claim infers it from the latest run row and `GetLatestRunAsync` is
+gone. Adoption is decided on the locked row (`OccurrenceState.Classify`: adopt precedes every other
+rule), not by matching `(scheduledFor, attempt)` against a run read.
 
 ## D10 — MANUAL trigger is first-class (user directive)
 
@@ -132,23 +152,51 @@ backoff accelerates the pending attempt but keeps the original occurrence. A run
 the same schedule is mid-execution is treated as satisfied by that execution (completion clears
 the marker) — deliberate.
 
+**Amended (#10, user directive change; D23):** the last sentence is withdrawn. It let a run-now move
+`nextRun` while a run was active, so the occurrence was duplicated after a crash.
+- **Run-now is refused while a run is active, live or lapsed** (awaiting adoption):
+  `RunInProgressException { Schedule, Run, Holder, LeaseExpiry }`, 409 over HTTP with a
+  `RunInProgressResultInfo` body (`Pug.Scheduling.WebApi.Models`); the client rebuilds the exception.
+- **The marker never moves `nextRun`.** `RequestRunAsync`, `ClearRunRequestAsync` and the defensive
+  clearing are gone; the claim that honors the request clears it in its own unit.
+- **Manual runs are not retried**: a failed manual run leaves the occurrence grid alone.
+- **A manual run during retry backoff accelerates the retry**: it carries the retry's attempt and
+  occurrence and counts as that retry.
+- **RUN_ALL keeps its backlog** across a manual run; **FIRE_ONCE and SKIP coalesce** an occurrence
+  already due when the run started (rules in `CompletionRules`).
+
 ## D11 — Misfire policies
 
 Occurrence is misfired when overdue beyond `MisfirePolicy.Threshold` (default 5 min).
-`FIRE_ONCE` (default): coalesce — execute once (trigger MISFIRE), next occurrence computed from
-now. `SKIP`: record a SKIPPED run (audit trail), advance, release — no execution. `RUN_ALL`:
-execute, and completion computes the next occurrence from the *executed* occurrence, naturally
+`FIRE_ONCE` (default): coalesce — execute once (trigger MISFIRE), next occurrence is the first grid
+slot after now (`Next( r, T, now )`, phase kept). `SKIP`: record a SKIPPED run (audit trail), advance, release — no execution. `RUN_ALL`:
+execute, and completion steps one slot from the *executed* occurrence (`Next( r, T, T )`), naturally
 catching up one by one.
+
+**Verified/amended (#10, sub-phase C):** the baselines are applied by `CompletionRules.NextOccurrence`
+on completion and on a SKIP, and an interval's grid keeps its phase (D12), so FIRE_ONCE/SKIP coalesce
+onto the original grid rather than drifting from "now". A manual run does not advance RUN_ALL's
+backlog (D10).
 
 ## D12 — Time and storage conventions
 
 Cronos for cron math, evaluated in the recurrence's IANA `TimeZone` (DST: skipped times jump
 forward); interval mode is UTC arithmetic from the previous occurrence; `NotBefore`/`NotAfter`
-clamp/exhaust. Everything persisted/compared in UTC. Durations stored as whole-second bigint
+clamp/exhaust (amended in #10, below). Everything persisted/compared in UTC. Durations stored as whole-second bigint
 columns (no TimeSpan handlers); SQLite DateTimes as invariant ISO-8601 TEXT (chronologically
 comparable); `ActionContext`/`RunSummary`/`JobOutcome` as JSON text columns via
 `JsonTypeHandler<T>`. Run trigger column is `runTrigger` (`trigger` is reserved in Postgres).
 Deletes are explicit (runs then schedule) rather than relying on FK cascade enforcement.
+
+**Amended (#10, sub-phase C):** `RecurrenceCalculator` exposes `GetFirstOccurrence( r, now )` and
+`GetNextOccurrence( r, previous, after )`. Cron: the next occurrence strictly after `after`.
+Interval: `previous + k·I` for the smallest `k >= 1` landing after `after`, so the grid keeps its
+phase instead of drifting. First occurrence: `NotBefore` when it is in the future (it anchors an
+interval's grid), otherwise `now + I` (previously `NotBefore + I`). `NotBefore`/`NotAfter` clamp
+every result. Registration and a recurrence change use `GetFirstOccurrence`, but a definition update
+changes `nextRun` only when the schedule is idle (`attempt = 0`, no run active) and the recurrence
+changed; during a run it leaves `nextRun` alone and the completion applies the new recurrence
+(`DefinitionRules.NextRunAfterUpdate`).
 
 ## D13 — Job types: schedulable vs executable
 
@@ -235,7 +283,8 @@ scheduler host serves more than one scheduling surface at once (user directive).
 - **Authorization stays with the facades** (see D16). Schedule and coordinator endpoints perform
   none of their own; they require an authenticated caller and map outcomes: `NotAuthorized` → 403,
   `UnknownScheduleException`/`UnknownRunException` → 404, `ClaimNotHeldException` → 409 (completion
-  only), `ArgumentException` → 400 `BadRequestResultInfo`. Worker management endpoints remain the one exception —
+  only), `RunInProgressException` → 409 with a `RunInProgressResultInfo` body (run route only;
+  amended in #10), `ArgumentException` → 400 `BadRequestResultInfo`. Worker management endpoints remain the one exception —
   `ISchedulerWorker` is a local control surface with no facade behind it — so they check
   `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`, qualified by claimant, with
   no owner exemption.
@@ -246,8 +295,9 @@ scheduler host serves more than one scheduling surface at once (user directive).
   the locally hosted instance, not a remote one.
 - **Owner is conveyed as an `ownerType`/`ownerIdentifier` query pair** (Groups' `Subject`
   convention) rather than a new request contract; supplying one half without the other is a 400.
-- **Run-now answers 202, not 200**: the request only brings the occurrence forward for a worker
-  to claim.
+- **Run-now answers 202, not 200**: the request only raises a marker for a worker to claim. **Amended
+  (#10):** it answers 409 `RunInProgressResultInfo` while a run is active (D10), and 400 for a
+  definition whose `Timeout` exceeds `TimerBounds.Maximum` at registration/update (D25).
 - Query parameters the handler validates are declared nullable so omission reaches the handler
   and yields a structured `BadRequestResultInfo`, instead of model binding failing with an empty
   400 body.
@@ -281,7 +331,9 @@ next occurrences at Debug; authorization denials, renewals from a worker that no
 claim, refused or lapsed-claim completions, and stale due candidates at Warning; a failure
 preparing a claimed job at Error, before its lease is released and the error rethrown.
 
-**A completion is accepted only if the reporter can be verified to hold the run.** The run records
+**A completion is accepted only if the reporter can be verified to hold the run.** *(Superseded in
+#10 by D23: the authority is the schedule row's `holder`; `ScheduleRun.ClaimedBy` is audit only.
+The rules below are history.)* The run records
 its holder (`ScheduleRun.ClaimedBy`, `"{claimant}/{worker}"`), set when the run is inserted
 (including a misfire-SKIP run) and transferred when a later claim adopts the unfinished run (D9).
 `ReportCompletionAsync` then: refuses a run that is already finished (a duplicate report must not
@@ -353,7 +405,9 @@ A worker host runs one or more **worker groups**. `AddSchedulingWorkers( WorkerO
 null, Func<IServiceProvider, IExecutionCoordinator> coordinator = null )` replaces
 `AddSchedulingWorker` and is called once per group. A group is `WorkerOptions.Workers` (default 1)
 identical `SchedulerWorker`s sharing a `Claimant` and an optional `JobType` filter (null claims any
-type); each worker claims, executes and reports one job at a time.
+type); each worker claims, executes and reports one *attended* job at a time (amended in #10: D25
+adds detached handlers, `WorkerInfo.DetachedJobs`, and the `CancellationGrace` and
+`MaxDetachedHandlers` options).
 
 - **Numbers are host-wide and deterministic**: 1..N across every group, in registration order,
   assigned at registration by an accumulator kept as a singleton instance in the service
@@ -364,11 +418,13 @@ type); each worker claims, executes and reports one job at a time.
 - **The default claimant is `Environment.MachineName`**, stable across restarts (the random suffix
   is gone). **Restart takeover** follows from D16: a restarted worker presenting the same claimant
   and number is the same lease holder (`claimant/number`), re-takes its own live lease and adopts
-  its unfinished run instead of waiting out the lease. The corollary: **two worker processes on one
+  its unfinished run instead of waiting out the lease. (#10, D23: the due pre-filter and
+  `OccurrenceState.Classify` match `holder = @holder` on the schedule row.) The corollary: **two worker processes on one
   machine must set distinct claimants**, or their identically numbered workers would take each
   other's claims as their own.
 - **Validation** (`WorkerOptions.Validate()`, run at registration and by the worker): claimant not
-  blank and free of `/`; `Workers >= 1`; `JobType` null or not blank. The worker additionally
+  blank and free of `/`; `Workers >= 1`; `JobType` null or not blank (#10 adds positive intervals,
+  `CancellationGrace >= 0`, durations within `TimerBounds.Maximum` and `MaxDetachedHandlers >= 1`). The worker additionally
   requires a number of 1 or more. An invalid group fails at `AddSchedulingWorkers` and consumes no
   numbers.
 - **Per-group coordinator credentials.** The optional `coordinator` factory supplies the group's
@@ -392,7 +448,9 @@ type); each worker claims, executes and reports one job at a time.
   no due work) carry `{Claimant}/{Worker}` and the group's `{JobType}` (`any` when unfiltered); job
   lines keep the job's `{JobType}`.
 
-## D21 — Lease arbitration runs READ COMMITTED (defect found by the Postgres tests)
+## D21 — Lease arbitration runs READ COMMITTED (defect found by the Postgres tests) — SUPERSEDED by D23
+
+Historical: the lease provider is gone (D23). The READ COMMITTED finding survives as `UnitsOfWork.Write` (D24).
 
 `Pug.Application.Data`'s `ExecuteAsync`/`PerformAsync` open a default `TransactionScope`, whose
 isolation is **Serializable**, and Npgsql enlists at `SERIALIZABLE`. There the losing side of a
@@ -405,7 +463,14 @@ state is never committed as part of a caller's transaction.
 
 The schedule store followed in D22.
 
-## D22 — The schedule store runs READ COMMITTED; adoption is conditional (#5)
+## D22 — The schedule store runs READ COMMITTED; adoption is conditional (#5) — PARTLY SUPERSEDED by D24
+
+Historical, with these parts no longer true after #10: "SQLite units are not atomic" (D24: they are,
+through self-enlistment); the finished-occurrence guard and the conditional adoption
+(`ClaimRunAsync`) were replaced by locking the row and deciding on it (D23); the single-statement
+conditions and the "`UpdateDefinition` vs. completion" lost update are gone for the same reason
+(#8, F3). What stands: units run in their own `RequiresNew` READ COMMITTED transactions
+(`UnitsOfWork.Write`).
 
 **Every schedule-store unit of `ExecutionCoordinator` and `Scheduler` runs in its own
 (`RequiresNew`) READ COMMITTED transaction**, the D21 pattern. This was checked unit by unit: none
@@ -462,13 +527,114 @@ Trade-offs of leaving Serializable:
   `TransactionScope`. A host that wrapped `RegisterAsync` in a transaction of its own no longer has
   the registration enlisted in it (Postgres; SQLite never enlisted).
 
+## D23 — Execution state on the schedule row; every transition is lock, decide, write (#10; supersedes D6 and D21)
+
+The coordinator's bugs (#7, #8, #9, F1, F3, the PR #6 patches) shared two causes. A running schedule
+looked like an occurrence that had not started, so every claim inferred its state from the latest run
+row and a separate lease. And no deciding read shared a transaction with its write. The redesign
+(user decision, 2026-11-14) fixes both.
+
+- **Schema v3 (nullable columns, v2 script names unchanged):** `activeRun`, `holder`
+  (`claimant/worker`), `leaseExpiry` (unindexed, so heartbeats stay HOT updates on Postgres) and
+  `occurrence` (the retry identity, non-null only while `attempt > 0`). The due indexes are recreated
+  as partial indexes on `activeRun is null`, plus `ixScheduleRequested` and `ixScheduleActive`. The
+  upgrade backfills `occurrence` from the latest run with `attempt > 0`, and turns each unfinished v2
+  run into `activeRun`, with `holder` from its `claimedBy` and `leaseExpiry` at the epoch: lapsed, so
+  the next claim adopts it.
+- **Every transition is one write unit** (`UnitsOfWork.Write`): lock the schedule row, decide in C#
+  on what was locked, write by identifier, commit. Claim, adopt, skip, renew and complete are
+  transitions of `ExecutionCoordinator`; run-now, definition update and delete are `Scheduler`'s. The
+  lock replaces every policy-bearing SQL condition (the guard, conditional adoption, the stale
+  check).
+- **Rules are small internal pure functions in `Pug.Scheduling`**, unit-tested without a database:
+  `OccurrenceState.Classify` (adopt > MANUAL > RETRY > MISFIRE/SKIP/SCHEDULE),
+  `CompletionRules` (retry, manual-run rules, baselines) and `DefinitionRules` (when `nextRun` may
+  change). **`IDataSession` holds storage primitives only**: reads (`GetScheduleAsync`/
+  `GetScheduleByActiveRunAsync( …, lockRow )`, `GetDueCandidatesAsync`, runs) and unconditional
+  writes by identifier (`SetExecutionAsync`, `SetOccurrenceStateAsync`, …). No session method
+  encodes a rule. The due query is the one place where SQL mirrors policy: a coarse pre-filter for
+  index use, documented as mirroring `Classify`, returning a superset; the decision is re-made on
+  the locked row.
+- **The holder on the schedule row is the authority** for renewal and completion; a completion by a
+  holder whose lease lapsed but was not adopted is accepted with a warning. `scheduleRun.claimedBy`
+  is audit only. A schedule with a lease always has a run in progress.
+- **Leases projects removed:** the four `Pug.Scheduling.Leases*` projects and
+  `IExecutionLeaseProvider` are deleted; `ScheduleInfo.ExecutionLease` is composed from the row.
+- **D20 restart takeover is by holder:** a claim whose holder equals the row's holder adopts the
+  unfinished run even while the lease is live.
+- **Delete locks the row first**, then removes runs and the schedule in one unit; a worker mid-run
+  fails its next renewal and its completion gets `UnknownRunException` (unchanged behaviour).
+- **Failing candidates are isolated:** a candidate that fails is logged at Error and the claim moves
+  on (#7), but when every candidate failed (none claimed, none handled as "no longer qualifies"),
+  the claim rethrows the last failure rather than reporting an idle window.
+- **Clocks:** `ExecutionCoordinator` and `Scheduler` take a `TimeProvider`; lease expiry is judged on
+  each coordinator host's clock, so `LeaseDuration` must exceed the skew between hosts (a
+  database-clock expiry is a follow-up, #12).
+- Run-now refusal, manual-run rules and the occurrence rules: D10, D11, D12.
+
+## D24 — SQLite self-enlistment, UnitsOfWork, row locks, shared session base (#10; partly supersedes D22)
+
+Microsoft.Data.Sqlite ignores `TransactionScope`, so on SQLite every statement autocommitted (the
+`docs/KNOWN-ISSUES.md` entry, #9). Postgres (Npgsql) enlists natively.
+
+- **SQLite sessions enlist themselves** (the Pug.Sal pattern, Sal D15/D19): when a scope is active
+  `DapperData` opens a real SQLite transaction on the session and enlists it through
+  `EnlistVolatile`. A write unit begins `IMMEDIATE` (the write lock up front, which serializes
+  writers: no row lock is needed), a read unit begins deferred. The commit is in phase one
+  (`Prepare`), so a failed commit aborts the scope; the session's `Dispose` waits for the
+  enlistment. Postgres does not copy it.
+- **`UnitsOfWork` (Data.Abstractions):** `Write` is `RequiresNew` + ReadCommitted, `Read` is
+  `RequiresNew` + RepeatableRead (a snapshot; a read-only transaction never fails at that level).
+  Nothing in the domain layer begins or commits a transaction, and no unit joins a caller's
+  `TransactionScope`.
+- **Postgres row locks:** a write unit that acts on what it read reads the row with `for update`
+  (`lockRow`, a dialect override). The loser of a race waits and then decides on the committed row,
+  instead of failing with `40001` under Serializable (D21, D22).
+- **Shared `DapperDataSessionBase`** (new `Pug.Scheduling.Data.Dapper`): the SQL, row types,
+  `Compose` and the JSON handler are written once. Providers override only the dialect:
+  enabled/paused predicate, run-requested predicate, locking clause, and SQLite's D18 UTC stamping
+  (`ReadTimestamp`). This replaces the hand-mirrored Postgres session. The due-candidate read is a
+  `union` of three bounded branches, one per partial index, because an `or` is a full scan on
+  SQLite.
+- **Host requirements on SQLite:** WAL journal mode is what makes "reads block nobody" true (a
+  deferred read snapshot does not block the writer); without it readers and the single writer
+  contend. DbUp must apply `GetSchemaUpgradeScripts()` in group order (schema version, then
+  sequence): DbUp sorts by script name, so the tests pass `RunGroupOrder`.
+- **D22 corrections:** "SQLite units are not atomic" is false after #10, and the guard and conditional
+  adoption are replaced by D23.
+- Follow-up: the enlistment now exists in Pug.Sal and here; its home is a shared package (#13).
+
+## D25 — Handlers that ignore cancellation are detached (#10, sub-phase D)
+
+The worker used to await the handler directly, so a handler ignoring cancellation held the worker
+past its timeout, past claim loss, and past shutdown.
+
+- The handler runs off the pump; the worker waits for it to finish or for a stop signal (timeout,
+  claim lost, host stopping), then cancels it and waits up to `WorkerOptions.CancellationGrace`
+  (default 10 s, below the host's 30 s shutdown timeout; zero detaches at once).
+- A handler still running after the grace is **detached**: the worker reports TIMED_OUT, or abandons
+  without a report on claim loss or shutdown, stops the heartbeat and moves on. The handler and its
+  DI scope are disposed when its task ends, exactly once. `WorkerInfo.DetachedJobs` counts them
+  (`ActiveJobs` counts attended jobs only).
+- **`MaxDetachedHandlers`** (default 2, at least 1): at that many the worker stops claiming and logs
+  an Error once, until one ends.
+- The invariant is "one *attended* job at a time". **A detached handler may overlap its own retry**
+  (D7); `IScheduledJobHandler` documents that handlers must honour cancellation.
+- **Guarded cancellation:** timeout, claim loss and shutdown cancel through one guarded `Cancel`, so
+  a throwing third-party cancellation callback cannot fault the heartbeat, the pump or the process.
+- **`TimerBounds.Maximum`** (2^32-2 ms, about 49.7 days; Abstractions) is the longest duration a
+  timer accepts. It is validated on both ends: `Scheduler` rejects a longer `Timeout` (and
+  `SchedulerOptions.DefaultTimeout`) with `ArgumentException` (400), and the worker fails a run whose
+  claimed timeout is out of range (a remote coordinator is not trusted) rather than letting it stop
+  the host. `WorkerOptions` durations are validated likewise (D20).
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**
-`dotnet test tests/Pug.Scheduling.Tests` green. The store-backed suites (lease provider,
-coordinator, scheduler, worker groups) are generic over fixture interfaces and run against both
-providers: SQLite (per-fixture temp DB, DbUp-migrated from `GetSchemaUpgradeScripts()`, WAL +
-busy_timeout) and PostgreSQL via Testcontainers (one `postgres:17-alpine` container per test run,
+`dotnet test tests/Pug.Scheduling.Tests` green. The store-backed suites (coordinator,
+scheduler, worker groups, migration) are generic over fixture interfaces and run against both
+providers: SQLite (per-fixture temp DB, DbUp-migrated from `GetSchemaUpgradeScripts()` in group order,
+WAL + busy_timeout) and PostgreSQL via Testcontainers (one `postgres:17-alpine` container per test run,
 a DbUp-migrated database per fixture). The Postgres classes carry `[Trait( "Category", "Postgres" )]`
 and need Docker (on this machine: `sg docker -c "dotnet test tests/Pug.Scheduling.Tests"`); without
 Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
@@ -492,6 +658,14 @@ Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
   adoption, finished-occurrence guard on claim; late-completion-vs-adoption and
   management-vs-completion race tests on both providers (D22) — **DONE (214 tests: 157
   SQLite/other, 57 Postgres)**.
+- **Coordinator redesign (#10)** — lease on the schedule row, lock-decide-write transitions, atomic
+  SQLite units, handler detach (D23, D24, D25). **A** shared Dapper session, `UnitsOfWork`, SQLite
+  enlistment, `TimeProvider`; **B** schema v3, state machine, run-now refusal, Leases removed;
+  **C** interval grid and per-policy baselines; **D** worker detach, `TimerBounds`; **E** documentation
+  reconciliation — **DONE (310 tests)**, awaiting the user's single review (no pause between
+  sub-phases, by user decision, for this work only). Closes #7, #8, #9. Follow-ups: **#11**
+  (`AbandonAsync`: graceful shutdown releases the lease), **#12** (database-clock lease expiry),
+  **#13** (shared SQLite enlistment package), **#14** (`for update skip locked` on Postgres claims).
 - **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
   handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).

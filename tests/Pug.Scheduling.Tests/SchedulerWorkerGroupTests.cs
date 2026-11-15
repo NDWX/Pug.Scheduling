@@ -2,11 +2,10 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
-using Pug.Application.Data.Extensions;
+using Pug.Scheduling.Data.Abstractions;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.JobHandler.Abstractions;
-using Pug.Scheduling.Leases;
 using Pug.Scheduling.Models;
 using Pug.Scheduling.Tests.Infrastructure;
 using Pug.Scheduling.Worker;
@@ -17,14 +16,12 @@ namespace Pug.Scheduling.Tests;
 /// <summary>
 /// Worker groups as registered by <c>AddSchedulingWorkers</c>: host-wide numbering, one hosted
 /// service per worker, per-group coordinators, and — against the real coordinator over each
-/// provider's stores, per the subclasses below — concurrent execution across workers and job-type
+/// provider's store, per the subclasses below — concurrent execution across workers and job-type
 /// filtering.
 /// </summary>
-// The fixtures are declared by the concrete subclasses: two IClassFixture<T> over type parameters
-// could unify (CS0695).
-public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabase>
+// The fixture is declared by the concrete subclasses.
+public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 	where TScheduleDatabase : class, IScheduleDatabaseFixture
-	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
 	// Records every claim and claims nothing.
 	private sealed class RecordingCoordinator : IExecutionCoordinator
@@ -47,12 +44,10 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabas
 	private static readonly TimeSpan FastPoll = TimeSpan.FromMilliseconds( 25 );
 
 	private readonly TScheduleDatabase _scheduleDatabase;
-	private readonly TLeaseDatabase _leaseDatabase;
 
-	protected SchedulerWorkerGroupTests( TScheduleDatabase scheduleDatabase, TLeaseDatabase leaseDatabase )
+	protected SchedulerWorkerGroupTests( TScheduleDatabase scheduleDatabase )
 	{
 		_scheduleDatabase = scheduleDatabase;
-		_leaseDatabase = leaseDatabase;
 	}
 
 	private static ServiceCollection NewServices( IExecutionCoordinator? coordinator = null )
@@ -335,9 +330,9 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabas
 								new ExecutionCoordinator(
 										new SequentialIdGenerator( $"run-{Guid.NewGuid():N}" ),
 										_scheduleDatabase.ApplicationData,
-										new DatabaseExecutionLeaseProvider( _leaseDatabase.ApplicationData ),
 										SecurityManagerFactory.CreateWithoutPrincipal(),
 										new ExecutionCoordinatorOptions(),
+										TimeProvider.System,
 										NullLogger<ExecutionCoordinator>.Instance ) );
 
 						DelegateJobHandlerFactory factory = new( _ => handler );
@@ -398,17 +393,15 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabas
 			}
 		};
 
-		await _scheduleDatabase.ApplicationData.PerformAsync(
-				async ( session, context ) => await session.InsertAsync( context.schedule ),
-				context: new { schedule } );
+		await _scheduleDatabase.ApplicationData.WriteAsync(
+				( session, context ) => session.InsertAsync( context ), schedule );
 
 		return schedule.Identifier;
 	}
 
 	private Task<IEnumerable<ScheduleRun>> GetRunsAsync( string schedule ) =>
-		_scheduleDatabase.ApplicationData.ExecuteAsync(
-				async ( session, context ) => await session.GetRunsAsync( context.schedule ),
-				context: new { schedule } );
+		_scheduleDatabase.ApplicationData.ReadAsync(
+				( session, context ) => session.GetRunsAsync( context ), schedule );
 
 	private static async Task WaitForAsync( Func<Task<bool>> condition )
 	{
@@ -427,24 +420,20 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase, TLeaseDatabas
 }
 
 public sealed class SqliteSchedulerWorkerGroupTests
-	: SchedulerWorkerGroupTests<SqliteScheduleDatabaseFixture, SqliteLeaseDatabaseFixture>,
-		IClassFixture<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteLeaseDatabaseFixture>
+	: SchedulerWorkerGroupTests<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteScheduleDatabaseFixture>
 {
-	public SqliteSchedulerWorkerGroupTests( SqliteScheduleDatabaseFixture scheduleDatabase,
-											SqliteLeaseDatabaseFixture leaseDatabase )
-		: base( scheduleDatabase, leaseDatabase )
+	public SqliteSchedulerWorkerGroupTests( SqliteScheduleDatabaseFixture scheduleDatabase )
+		: base( scheduleDatabase )
 	{
 	}
 }
 
 [Trait( "Category", "Postgres" )]
 public sealed class PostgresSchedulerWorkerGroupTests
-	: SchedulerWorkerGroupTests<PostgresScheduleDatabaseFixture, PostgresLeaseDatabaseFixture>,
-		IClassFixture<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresLeaseDatabaseFixture>
+	: SchedulerWorkerGroupTests<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresScheduleDatabaseFixture>
 {
-	public PostgresSchedulerWorkerGroupTests( PostgresScheduleDatabaseFixture scheduleDatabase,
-											PostgresLeaseDatabaseFixture leaseDatabase )
-		: base( scheduleDatabase, leaseDatabase )
+	public PostgresSchedulerWorkerGroupTests( PostgresScheduleDatabaseFixture scheduleDatabase )
+		: base( scheduleDatabase )
 	{
 	}
 }

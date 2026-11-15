@@ -140,6 +140,25 @@ public class SchedulerClientTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
+	public async Task RunNowDuringARunSurfacesRunInProgressException()
+	{
+		string identifier = await _scheduler.RegisterAsync( NewDefinition() );
+
+		await _fixture.MarkRunInProgressAsync( identifier );
+
+		RunInProgressException exception =
+			await Assert.ThrowsAsync<RunInProgressException>( () => _scheduler.RunNowAsync( identifier ) );
+
+		ScheduleInfo schedule = await _scheduler.GetScheduleAsync( identifier );
+
+		Assert.Equal( identifier, exception.Schedule );
+		Assert.Equal( schedule.ExecutionLease.Run, exception.Run );
+		Assert.Equal( "elsewhere/1", exception.Holder );
+		Assert.Equal( schedule.ExecutionLease.Expiry, exception.LeaseExpiry );
+		Assert.False( schedule.State.RunRequested );
+	}
+
+	[Fact]
 	public async Task UnknownScheduleSurfacesTheAbstractionsException()
 	{
 		UnknownScheduleException exception =

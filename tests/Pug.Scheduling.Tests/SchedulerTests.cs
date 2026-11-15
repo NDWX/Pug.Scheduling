@@ -1,41 +1,36 @@
 using Pug.Application.Security;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
-using Pug.Scheduling.Leases;
 using Pug.Scheduling.Models;
 using Pug.Scheduling.Tests.Infrastructure;
 
 namespace Pug.Scheduling.Tests;
 
-// The scheduler facade over real schedule and lease stores, run against each provider by the
-// subclasses below. They declare the class fixtures: two IClassFixture<T> over type parameters
-// could unify (CS0695).
-public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
+// The scheduler facade over a real schedule store, run against each provider by the subclasses
+// below, which declare the class fixture.
+public abstract class SchedulerTests<TScheduleDatabase>
 	where TScheduleDatabase : class, IScheduleDatabaseFixture
-	where TLeaseDatabase : class, ILeaseDatabaseFixture
 {
 	private const string Domain = "tenant-1";
 	private const string OwnerUser = "owner-1";
 
 	private readonly TScheduleDatabase _scheduleDatabase;
 	private readonly IScheduler _scheduler;
-	private readonly IExecutionLeaseProvider _leaseProvider;
 
-	protected SchedulerTests( TScheduleDatabase scheduleDatabase, TLeaseDatabase leaseDatabase )
+	protected SchedulerTests( TScheduleDatabase scheduleDatabase )
 	{
 		_scheduleDatabase = scheduleDatabase;
-		_leaseProvider = new DatabaseExecutionLeaseProvider( leaseDatabase.ApplicationData );
 		_scheduler = CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ) );
 	}
 
-	private IScheduler CreateScheduler( ISecurityManager securityManager ) =>
+	private IScheduler CreateScheduler( ISecurityManager securityManager, TimeProvider? timeProvider = null ) =>
 		new Scheduler(
 				new SequentialIdGenerator( "schedule" ),
 				_scheduleDatabase.ApplicationData,
 				securityManager,
-				_leaseProvider,
 				new FakeJobTypeRegistry( "test" ),
-				new SchedulerOptions() );
+				new SchedulerOptions(),
+				timeProvider ?? TimeProvider.System );
 
 	private static ScheduleDefinition NewDefinition( string jobType = "test", string name = "Test schedule",
 													Recurrence? recurrence = null ) =>
@@ -49,6 +44,34 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 		};
 
 	private static Reference User( string identifier ) => new() { Type = "USER", Identifier = identifier };
+
+	// Every time the facade stamps comes from the injected clock: the next occurrence and the
+	// registration and update action contexts.
+	[Fact]
+	public async Task TimesComeFromTheInjectedClock()
+	{
+		DateTime registeredAt = new( 2031, 3, 4, 5, 6, 7, DateTimeKind.Utc );
+		ManualTimeProvider clock = new( registeredAt );
+		IScheduler scheduler = CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), clock );
+
+		string identifier = await scheduler.RegisterAsync( NewDefinition() );
+
+		ScheduleInfo registered = await scheduler.GetScheduleAsync( identifier );
+
+		Assert.Equal( registeredAt.AddHours( 1 ), registered.State.NextRun );
+		Assert.Equal( registeredAt, registered.Registration.Timestamp );
+
+		clock.Advance( TimeSpan.FromDays( 1 ) );
+
+		await scheduler.UpdateDefinitionAsync(
+				identifier,
+				NewDefinition( recurrence: new Recurrence { Interval = TimeSpan.FromHours( 2 ), TimeZone = "Etc/UTC" } ) );
+
+		ScheduleInfo updated = await scheduler.GetScheduleAsync( identifier );
+
+		Assert.Equal( registeredAt.AddDays( 1 ).AddHours( 2 ), updated.State.NextRun );
+		Assert.Equal( registeredAt.AddDays( 1 ), updated.LastUpdate!.Timestamp );
+	}
 
 	[Fact]
 	public async Task RegistrationPersistsDefinitionAppliesDefaultsAndComputesNextRun()
@@ -143,15 +166,17 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 	}
 
 	[Fact]
-	public async Task RunNowBringsNextRunForward()
+	public async Task RunNowRaisesARequestWithoutMovingTheNextRun()
 	{
 		string identifier = await _scheduler.RegisterAsync( NewDefinition() );
+
+		DateTime? nextRun = ( await _scheduler.GetScheduleAsync( identifier ) ).State.NextRun;
 
 		await _scheduler.RunNowAsync( identifier );
 
 		ScheduleInfo schedule = await _scheduler.GetScheduleAsync( identifier );
 
-		Assert.True( Math.Abs( ( schedule.State.NextRun!.Value - DateTime.UtcNow ).TotalSeconds ) < 30 );
+		Assert.Equal( nextRun, schedule.State.NextRun );
 		Assert.True( schedule.State.RunRequested );
 	}
 
@@ -207,23 +232,50 @@ public abstract class SchedulerTests<TScheduleDatabase, TLeaseDatabase>
 
 		await Assert.ThrowsAsync<UnknownScheduleException>( () => _scheduler.GetScheduleAsync( "missing" ) );
 	}
+
+	[Fact]
+	public async Task TimeoutBeyondTheTimerBoundIsRejected()
+	{
+		ScheduleDefinition definition = NewDefinition() with { Timeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) };
+
+		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( definition ) );
+
+		Assert.Equal( "definition", exception.ParamName );
+
+		// The bound itself is accepted.
+		await _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimerBounds.Maximum } );
+	}
+
+	[Fact]
+	public void DefaultTimeoutBeyondTheTimerBoundIsRejected()
+	{
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				() => new Scheduler(
+						new SequentialIdGenerator( "schedule" ), _scheduleDatabase.ApplicationData,
+						SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), new FakeJobTypeRegistry( "test" ),
+						new SchedulerOptions { DefaultTimeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) },
+						TimeProvider.System ) );
+
+		Assert.Equal( "options", exception.ParamName );
+	}
 }
 
-public sealed class SqliteSchedulerTests : SchedulerTests<SqliteScheduleDatabaseFixture, SqliteLeaseDatabaseFixture>,
-		IClassFixture<SqliteScheduleDatabaseFixture>, IClassFixture<SqliteLeaseDatabaseFixture>
+public sealed class SqliteSchedulerTests : SchedulerTests<SqliteScheduleDatabaseFixture>,
+		IClassFixture<SqliteScheduleDatabaseFixture>
 {
-	public SqliteSchedulerTests( SqliteScheduleDatabaseFixture scheduleDatabase, SqliteLeaseDatabaseFixture leaseDatabase )
-		: base( scheduleDatabase, leaseDatabase )
+	public SqliteSchedulerTests( SqliteScheduleDatabaseFixture scheduleDatabase )
+		: base( scheduleDatabase )
 	{
 	}
 }
 
 [Trait( "Category", "Postgres" )]
-public sealed class PostgresSchedulerTests : SchedulerTests<PostgresScheduleDatabaseFixture, PostgresLeaseDatabaseFixture>,
-		IClassFixture<PostgresScheduleDatabaseFixture>, IClassFixture<PostgresLeaseDatabaseFixture>
+public sealed class PostgresSchedulerTests : SchedulerTests<PostgresScheduleDatabaseFixture>,
+		IClassFixture<PostgresScheduleDatabaseFixture>
 {
-	public PostgresSchedulerTests( PostgresScheduleDatabaseFixture scheduleDatabase, PostgresLeaseDatabaseFixture leaseDatabase )
-		: base( scheduleDatabase, leaseDatabase )
+	public PostgresSchedulerTests( PostgresScheduleDatabaseFixture scheduleDatabase )
+		: base( scheduleDatabase )
 	{
 	}
 }

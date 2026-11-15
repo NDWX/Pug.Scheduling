@@ -25,6 +25,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Pug.Application.Data.Common" Version="1.1.1" />
+		<PackageReference Include="Pug.Application.Data.Extensions" Version="1.0.0" />
 	</ItemGroup>
 
 </Project>

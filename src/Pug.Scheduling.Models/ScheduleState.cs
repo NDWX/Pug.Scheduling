@@ -32,8 +32,8 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Next occurrence in UTC. Null when the schedule is disabled or its recurrence is
-		// exhausted (past Recurrence.NotAfter).
+		// Next occurrence in UTC, or the time of the pending retry while Attempt is above 0. Null
+		// when the schedule is disabled or its recurrence is exhausted (past Recurrence.NotAfter).
 		[DataMember]
 		public DateTime? NextRun
 		{
@@ -46,7 +46,8 @@ namespace Pug.Scheduling.Models
 		}
 
 		// True when an immediate run has been explicitly requested (run-now). Consumed by the
-		// execution coordinator at claim time to classify the resulting run as MANUAL.
+		// execution coordinator at claim time to classify the resulting run as MANUAL. Independent
+		// of NextRun: a request never moves the next occurrence.
 		[Required, DataMember( IsRequired = true )]
 		public bool RunRequested
 		{
@@ -62,6 +63,19 @@ namespace Pug.Scheduling.Models
 		// completes (successfully or terminally).
 		[Required, DataMember( IsRequired = true )]
 		public int Attempt
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// Original occurrence (UTC) of the retry in progress: the idempotency key every retry of
+		// the occurrence re-executes under. Null while Attempt is 0.
+		[DataMember]
+		public DateTime? Occurrence
 		{
 			get;
 #if NET5_0_OR_GREATER

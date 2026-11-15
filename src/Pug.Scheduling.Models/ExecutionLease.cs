@@ -4,15 +4,28 @@ using System.Runtime.Serialization;
 
 namespace Pug.Scheduling.Models
 {
-	// Claim held by a worker instance while it executes the schedule's due occurrence. A schedule
-	// with no lease (or an expired one) is claimable; the lease is heartbeat-renewed during long
-	// runs and cleared on completion. Expiry is what makes crashed workers recoverable: peers may
-	// reclaim once it passes, yielding at-least-once execution. Leases are arbitrated and stored
-	// by IExecutionLeaseProvider, independently of the schedule store.
+	// Claim held by a worker on the schedule's active run. Stored on the schedule row and written
+	// only by the execution coordinator's transitions: set when a run starts or is adopted,
+	// heartbeat-renewed during long runs, and cleared when the run completes. Expiry is what makes
+	// crashed workers recoverable: once it passes, a peer may adopt the unfinished run, yielding
+	// at-least-once execution. A lapsed lease stays on the schedule until its run is adopted or
+	// completed, so a schedule with a lease always has a run in progress.
 	[DataContract]
 	public record ExecutionLease
 	{
-		// Unique identifier of the worker instance holding the claim.
+		// The schedule's active run: the run the claim is on.
+		[Required, DataMember( IsRequired = true )]
+		public string Run
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// The worker holding the claim, as "{claimant}/{worker}".
 		[Required, DataMember( IsRequired = true )]
 		public string ClaimedBy
 		{

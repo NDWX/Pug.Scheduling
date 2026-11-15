@@ -1,6 +1,4 @@
 using DbUp;
-using DbUp.Builder;
-using DbUp.Engine;
 using Microsoft.Data.Sqlite;
 using Pug.Application.Data;
 using Pug.Scheduling.Data.Abstractions;
@@ -10,8 +8,7 @@ namespace Pug.Scheduling.Tests.Infrastructure;
 
 /// <summary>
 /// Provisions a fresh, isolated SQLite database for the schedule store (migrated from the
-/// <see cref="DapperData"/> schema scripts) — separate from the lease store database, mirroring
-/// the production separation of the two.
+/// <see cref="DapperData"/> schema scripts).
 /// </summary>
 public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IAsyncLifetime
 {
@@ -44,15 +41,7 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 
 	private static void UpgradeDatabase( string connectionString, DapperData data )
 	{
-		UpgradeEngineBuilder builder = DeployChanges.To.SqliteDatabase( connectionString );
-
-		foreach( SchemaUpgradeScript schemaScript in data.GetSchemaUpgradeScripts() )
-			builder = builder.WithScript( schemaScript.UpgradeScript.Name, schemaScript.UpgradeScript.Script );
-
-		DatabaseUpgradeResult result = builder.LogToNowhere().Build().PerformUpgrade();
-
-		if( !result.Successful )
-			throw new InvalidOperationException( "DbUp schema migration failed.", result.Error );
+		SchemaUpgrade.Apply( DeployChanges.To.SqliteDatabase( connectionString ), data.GetSchemaUpgradeScripts() );
 
 		using SqliteConnection connection = new( connectionString );
 		connection.Open();

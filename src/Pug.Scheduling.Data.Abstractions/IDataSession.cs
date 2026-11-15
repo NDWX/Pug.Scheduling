@@ -6,81 +6,78 @@ namespace Pug.Scheduling.Data.Abstractions
 {
 	// Storage contract for the schedule store, consumed only by the core Scheduler facade and
 	// ExecutionCoordinator implementation — never by workers (they go through
-	// IExecutionCoordinator) and never by API consumers (they go through IScheduler). Methods are
-	// storage primitives: policy (authorization, validation, due-ness rules, misfire/retry
-	// decisions, next-occurrence computation) lives with the callers, which compose primitives
-	// into atomic units using the inherited transaction control. Execution leases are not this
-	// store's concern: they live behind IExecutionLeaseProvider, in their own storage.
+	// IExecutionCoordinator) and never by API consumers (they go through IScheduler).
+	//
+	// Storage primitives only: sessions read, lock and write by identifier, and no member encodes
+	// a rule. Due-ness, adoption, misfire, retry, manual-run rules, run-now refusal and when the
+	// next occurrence may change are all decided by the callers, which compose primitives into
+	// units of work (UnitsOfWork): every provider makes a unit one local transaction. A unit that
+	// acts on what it read locks the row first (lockRow), decides, and writes the decided values.
+	//
+	// The execution lease lives on the schedule row (active run, holder, expiry) and is written
+	// only by the execution coordinator's transitions.
 	public interface IDataSession : IApplicationDataSession
 	{
-		// == Management operations (Scheduler facade) ==
+		// == Schedules ==
 
 		Task InsertAsync( ScheduleInfo schedule );
 
-		Task<ScheduleInfo?> GetScheduleAsync( string identifier );
+		// lockRow holds the row's write lock until the unit of work ends, so the unit can act on
+		// what it read (a write unit only; Postgres 'for update'). SQLite needs no row lock: its
+		// write unit holds the database write lock from its first statement.
+		Task<ScheduleInfo?> GetScheduleAsync( string identifier, bool lockRow = false );
+
+		// The schedule whose active run is the given run, or null when no schedule has it active
+		// (the run finished, or it and its schedule were deleted). lockRow as for GetScheduleAsync.
+		Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, bool lockRow = false );
 
 		// Lists schedules within a domain, optionally filtered by owner principal and/or job
 		// type. Never crosses domains.
 		Task<IEnumerable<ScheduleInfo>> GetSchedulesAsync( string domain, Reference? owner = null, string? jobType = null );
 
-		// Replaces the schedule's definition columns, stores the recomputed next occurrence, and
-		// stamps the row's lastUpdate column (reserved for definition updates).
-		Task UpdateDefinitionAsync( string schedule, ScheduleDefinition definition, DateTime? nextRun, ActionContext<Reference> lastUpdate );
+		// Identifiers of at most maximumSchedules enabled, unpaused schedules (of jobType, when not
+		// null) that may have work for holder at now: idle with a run requested or an elapsed next
+		// occurrence, or with an active run whose lease expired or is holder's own. Requested ones
+		// first, then by next occurrence.
+		//
+		// A coarse pre-filter for index use only, mirroring OccurrenceState.Classify in
+		// Pug.Scheduling: it may return candidates that no longer qualify by the time they are
+		// locked, and the caller decides on the locked row.
+		Task<IEnumerable<string>> GetDueCandidatesAsync( DateTime now, string holder, string? jobType, int maximumSchedules );
 
-		// Deletes the schedule and (by cascade) its run history.
-		Task DeleteAsync( string schedule );
+		// Replaces the schedule's definition columns, its next occurrence, and the row's
+		// lastUpdate stamp (reserved for definition updates).
+		Task UpdateDefinitionAsync( string schedule, ScheduleDefinition definition, DateTime? nextRun, ActionContext<Reference> lastUpdate );
 
 		Task SetPausedAsync( string schedule, bool paused );
 
-		// Moves the schedule's next occurrence without touching the rest of its state; clears any
-		// pending run request.
-		Task UpdateNextRunAsync( string schedule, DateTime? nextRun );
+		Task SetRunRequestedAsync( string schedule, bool requested );
 
-		// Requests an immediate run: moves the next occurrence to requestedTime and raises the
-		// RunRequested marker, which the coordinator consumes to classify the run as MANUAL.
-		Task RequestRunAsync( string schedule, DateTime requestedTime );
+		// Sets the schedule's execution lease columns (active run, holder, expiry) to lease, or
+		// clears them when lease is null.
+		Task SetExecutionAsync( string schedule, ExecutionLease? lease );
 
-		// Lowers the RunRequested marker once the requested run has been claimed.
-		Task ClearRunRequestAsync( string schedule );
+		// Sets the schedule's occurrence-progress columns to progress.
+		Task SetOccurrenceStateAsync( string schedule, OccurrenceProgress progress );
 
-		// == Execution operations (ExecutionCoordinator) ==
+		// Deletes the schedule's run history, then the schedule.
+		Task DeleteAsync( string schedule );
 
-		// Schedules that are enabled, not paused, and due (NextRun elapsed by dueBy), ordered by
-		// NextRun, restricted to jobType when it is not null. A plain read with no claim
-		// semantics: exclusive execution is arbitrated by IExecutionLeaseProvider, so concurrent
-		// coordinators may read overlapping candidates and race for the lease.
-		Task<IEnumerable<ScheduleInfo>> GetDueSchedulesAsync( DateTime dueBy, string? jobType, int maximumSchedules );
+		// == Runs ==
 
 		Task InsertRunAsync( ScheduleRun run );
 
 		Task<ScheduleRun?> GetRunAsync( string identifier );
 
-		// The schedule's most recently started run, or null when it has never run. Used by the
-		// coordinator to carry the original occurrence time into retries, and to adopt the
-		// unfinished run of a lapsed claim instead of inserting a duplicate.
-		Task<ScheduleRun?> GetLatestRunAsync( string schedule );
-
-		// Records the lease holder ("{claimant}/{worker}") a run is executing under: set at
-		// insertion, and transferred when another worker adopts the unfinished run. The transfer
-		// applies only while the run is unfinished. Returns false when nothing was updated: the
-		// previous holder's completion landed after the caller read the run, so a finished run is
-		// never adopted (and re-executed).
-		Task<bool> ClaimRunAsync( string run, string claimedBy );
-
-		// Records the run's terminal state (finished timestamp, worker classification, handler
-		// outcome), only while the run is unfinished and still claimed by claimedBy. A run recorded
-		// before holders were tracked has no holder and is matched regardless. Returns false when
-		// nothing was updated: the run finished or was adopted after the caller checked it, so the
-		// check and the write cannot be split by a concurrent adoption.
-		Task<bool> CompleteRunAsync( string run, string claimedBy, DateTime finished, string result, JobOutcome? outcome );
-
-		// Records occurrence progression on the schedule: retry attempt counter, next occurrence,
-		// and last-run summary in one update; clears any pending run request. Callers must hold
-		// the schedule's execution lease — this is not verified here.
-		Task RecordOccurrenceCompletionAsync( string schedule, int attempt, DateTime? nextRun, RunSummary lastRun );
-
 		// Recorded runs of the schedule, most recent first, optionally bounded (inclusive) by
 		// start timestamp.
 		Task<IEnumerable<ScheduleRun>> GetRunsAsync( string schedule, DateTime? from = null, DateTime? to = null );
+
+		// Records the run's terminal state: finished timestamp, worker classification, handler
+		// outcome.
+		Task FinishRunAsync( string run, DateTime finished, string result, JobOutcome? outcome );
+
+		// Records the worker that last claimed the run (ScheduleRun.ClaimedBy, an audit field).
+		Task SetRunClaimantAsync( string run, string claimedBy );
 	}
 }
