@@ -35,7 +35,7 @@ public class ExecutionCoordinatorEndpointsTests : IClassFixture<SchedulingApiFix
 		foreach( string operation in new[]
 				{
 					CoordinatorSecurityOperations.ClaimJobs, CoordinatorSecurityOperations.RenewClaim,
-					CoordinatorSecurityOperations.ReportCompletion
+					CoordinatorSecurityOperations.AbandonClaim, CoordinatorSecurityOperations.ReportCompletion
 				} )
 			// Grants are scoped to the claimant identity the caller may act as.
 			_fixture.Authorizations.Grant(
@@ -246,7 +246,44 @@ public class ExecutionCoordinatorEndpointsTests : IClassFixture<SchedulingApiFix
 		Assert.False( await SchedulingApiFixture.ReadAsync<bool>( foreignRenewal ) );
 	}
 
+	[Fact]
+	public async Task AbandonmentReleasesTheClaimAndReportsWhetherItWasHeld()
+	{
+		await RegisterDueScheduleAsync( "Abandoned schedule" );
+
+		using HttpClient client = _fixture.CreateClient( Worker );
+
+		ClaimedJob job = await ClaimAsync( client, Worker );
+
+		// A sibling worker does not hold the claim: false, not an error status.
+		HttpResponseMessage sibling = await client.PostAsync(
+				$"/executionCoordinator/JobRuns/{job.Context.Run}/abandonment?{CallerQuery( Worker, _worker + 1000 )}",
+				null );
+
+		Assert.Equal( HttpStatusCode.OK, sibling.StatusCode );
+		Assert.False( await SchedulingApiFixture.ReadAsync<bool>( sibling ) );
+
+		HttpResponseMessage abandonment = await client.PostAsync(
+				$"/executionCoordinator/JobRuns/{job.Context.Run}/abandonment?{CallerQuery( Worker )}", null );
+
+		Assert.Equal( HttpStatusCode.OK, abandonment.StatusCode );
+		Assert.True( await SchedulingApiFixture.ReadAsync<bool>( abandonment ) );
+	}
+
+	[Fact]
+	public async Task AbandoningAsAnotherWorkerIsForbidden()
+	{
+		using HttpClient client = _fixture.CreateClient( Worker );
+
+		HttpResponseMessage response = await client.PostAsync(
+				$"/executionCoordinator/JobRuns/some-run/abandonment?{CallerQuery( OtherWorker )}", null );
+
+		Assert.Equal( HttpStatusCode.Forbidden, response.StatusCode );
+	}
+
 	[Theory]
+	[InlineData( "abandonment", "?worker=1", "MISSING_ARGUMENT", "claimant" )]
+	[InlineData( "abandonment", "?claimant=remote-worker-1&worker=0", "INVALID_ARGUMENT", "worker" )]
 	[InlineData( "leaseRenewal", "", "MISSING_ARGUMENT", "claimant" )]
 	[InlineData( "leaseRenewal", "?worker=1", "MISSING_ARGUMENT", "claimant" )]
 	[InlineData( "leaseRenewal", "?claimant=remote-worker-1", "MISSING_ARGUMENT", "worker" )]

@@ -29,6 +29,14 @@ namespace Pug.Scheduling.Abstractions
 		// peer); the worker must then abandon the run without reporting completion.
 		Task<bool> RenewClaimAsync( string run, string claimant, int worker );
 
+		// Releases a claim the worker is giving up on a graceful shutdown, so a peer can adopt the
+		// run at its next claim without waiting for the lease to lapse: the lease is expired, while
+		// the run and its holder are kept (the next claim classifies it as an adoption). Returns
+		// true when the caller held the claim and it was released; false when it is not held (it
+		// was adopted by a peer, the run finished, the run is unknown, or the schedule was
+		// deleted). Never throws ClaimNotHeldException: abandoning is best effort.
+		Task<bool> AbandonClaimAsync( string run, string claimant, int worker );
+
 		// Reports the terminal state of a claimed run: records run history, releases the claim,
 		// applies the schedule's RetryPolicy when the outcome is unsuccessful, and computes the
 		// schedule's next occurrence. result is a well-known RunResults value — the worker's

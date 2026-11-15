@@ -12,6 +12,8 @@ namespace Pug.Scheduling.Abstractions
 
 		public static string RenewClaim => "RENEW_CLAIM";
 
+		public static string AbandonClaim => "ABANDON_CLAIM";
+
 		public static string ReportCompletion => "REPORT_COMPLETION";
 	}
 }

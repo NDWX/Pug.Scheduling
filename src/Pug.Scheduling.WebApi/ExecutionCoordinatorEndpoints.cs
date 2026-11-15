@@ -55,6 +55,19 @@ public static class ExecutionCoordinatorEndpoints
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
+		routes.MapPost( "executionCoordinator/JobRuns/{run}/abandonment", AbandonClaim )
+			.RequireAuthorization()
+			.WithName( "AbandonJobRunClaim" )
+#if NET7_0_OR_GREATER
+			.WithTags( "ExecutionCoordinator" )
+			.WithSummary( "Release a claimed job run so a peer can adopt it immediately" )
+#endif
+			// The body is the coordinator's own answer: false means the claim was not held (nothing
+			// was released), which is an expected outcome, not a request failure.
+			.Produces<bool>( StatusCodes.Status200OK )
+			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
+			.Produces( StatusCodes.Status403Forbidden );
+
 		routes.MapPost( "executionCoordinator/JobRuns/{run}/completion", ReportCompletion )
 			.RequireAuthorization()
 			.WithName( "ReportJobRunCompletion" )
@@ -148,6 +161,32 @@ public static class ExecutionCoordinatorEndpoints
 		{
 			return Results.Ok(
 					await coordinator.RenewClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) );
+		}
+		catch( NotAuthorized )
+		{
+			return Results.Forbid();
+		}
+		catch( ArgumentException e )
+		{
+			return InvalidArgument( e );
+		}
+	}
+
+	private static async Task<IResult> AbandonClaim(
+		[FromRoute] string run,
+		[FromQuery] string? claimant,
+		[FromQuery] string? worker,
+		[FromServices] IExecutionCoordinator coordinator )
+	{
+		IResult? invalid = ParseCaller( claimant, worker, out int workerNumber );
+
+		if( invalid is not null )
+			return invalid;
+
+		try
+		{
+			return Results.Ok(
+					await coordinator.AbandonClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) );
 		}
 		catch( NotAuthorized )
 		{

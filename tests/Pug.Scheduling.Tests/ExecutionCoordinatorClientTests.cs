@@ -38,7 +38,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 		foreach( string operation in new[]
 				{
 					CoordinatorSecurityOperations.ClaimJobs, CoordinatorSecurityOperations.RenewClaim,
-					CoordinatorSecurityOperations.ReportCompletion
+					CoordinatorSecurityOperations.AbandonClaim, CoordinatorSecurityOperations.ReportCompletion
 				} )
 			fixture.Authorizations.Grant(
 					Worker, operation, SecurityObjectTypes.ExecutionCoordinator, identifier: Worker );
@@ -135,6 +135,24 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 		IExecutionCoordinator other = new ExecutionCoordinatorClient( _fixture.CreateApiClient( OtherWorker ) );
 
 		Assert.False( await other.RenewClaimAsync( job!.Context.Run, OtherWorker, _worker ) );
+	}
+
+	[Fact]
+	public async Task AbandonmentRoundTripsAsABool()
+	{
+		await RegisterDueScheduleAsync( "Abandoned remotely" );
+
+		ClaimedJob? job = await _coordinator.ClaimDueJobAsync( Worker, _worker, null );
+
+		Assert.False( await _coordinator.AbandonClaimAsync( job!.Context.Run, Worker, _worker + 1000 ) );
+		Assert.True( await _coordinator.AbandonClaimAsync( job.Context.Run, Worker, _worker ) );
+		Assert.False( await _coordinator.AbandonClaimAsync( "no-such-run", Worker, _worker ) );
+	}
+
+	[Fact]
+	public async Task AbandoningAsAnotherClaimantSurfacesAsNotAuthorized()
+	{
+		await Assert.ThrowsAsync<NotAuthorized>( () => _coordinator.AbandonClaimAsync( "some-run", OtherWorker, 1 ) );
 	}
 
 	[Fact]

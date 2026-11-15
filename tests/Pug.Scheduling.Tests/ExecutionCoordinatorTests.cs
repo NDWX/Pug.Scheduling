@@ -768,6 +768,104 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.True( await _coordinator.RenewClaimAsync( job.Context.Run, Claimant, 2 ) );
 	}
 
+	// == Abandon ==
+
+	[Fact]
+	public async Task AbandonedClaimIsAdoptedByAPeerAtOnceWithoutWaitingForTheLease()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		// A live peer cannot take it before the abandonment.
+		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 2, _jobType ) );
+
+		Assert.True( await _coordinator.AbandonClaimAsync( job.Context.Run, Claimant, 1 ) );
+
+		ClaimedJob adopted = await ClaimSingleAsync( schedule, worker: 2 );
+
+		Assert.Equal( job.Context.Run, adopted.Context.Run );
+		Assert.Equal( job.Context.ScheduledFor, adopted.Context.ScheduledFor );
+		Assert.Equal( job.Context.Trigger, adopted.Context.Trigger );
+		Assert.Single( await GetRunsAsync( schedule ) );
+		Assert.Equal( $"{Claimant}/2", ( await GetScheduleAsync( schedule ) ).ExecutionLease.ClaimedBy );
+	}
+
+	[Fact]
+	public async Task AbandonByANonHolderChangesNothing()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		ExecutionLease before = ( await GetScheduleAsync( schedule ) ).ExecutionLease;
+
+		Assert.False( await _coordinator.AbandonClaimAsync( job.Context.Run, Claimant, 2 ) );
+
+		Assert.Equal( before, ( await GetScheduleAsync( schedule ) ).ExecutionLease );
+		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 2, _jobType ) );
+	}
+
+	[Fact]
+	public async Task AbandonOfAFinishedOrUnknownRunIsFalse()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule );
+
+		await CompleteAsync( job );
+
+		Assert.False( await _coordinator.AbandonClaimAsync( job.Context.Run, Claimant, 1 ) );
+		Assert.False( await _coordinator.AbandonClaimAsync( "no-such-run", Claimant, 1 ) );
+	}
+
+	[Fact]
+	public async Task AbandonAfterScheduleDeletionIsFalse()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule );
+
+		await _scheduler.DeleteAsync( schedule );
+
+		Assert.False( await _coordinator.AbandonClaimAsync( job.Context.Run, Claimant, 1 ) );
+	}
+
+	// The abandoned claim is only expired, still the holder's own until a peer adopts it (the
+	// lapsed-but-holder-matches rule, D16/D23): a late completion is accepted, and a peer then
+	// finds nothing to adopt.
+	[Fact]
+	public async Task CompletionAfterAbandonAndBeforeAdoptionIsAccepted()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		Assert.True( await _coordinator.AbandonClaimAsync( job.Context.Run, Claimant, 1 ) );
+
+		await CompleteAsync( job );
+
+		ScheduleRun run = Assert.Single( await GetRunsAsync( schedule ) );
+
+		Assert.Equal( RunResults.Succeeded, run.Result );
+		Assert.Null( await _coordinator.ClaimDueJobAsync( Claimant, 2, _jobType ) );
+	}
+
+	// After a peer adopted the abandoned run, the abandoner's late completion is refused.
+	[Fact]
+	public async Task CompletionAfterAbandonAndAdoptionIsRefused()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule, worker: 1 );
+
+		Assert.True( await _coordinator.AbandonClaimAsync( job.Context.Run, Claimant, 1 ) );
+
+		await ClaimSingleAsync( schedule, worker: 2 );
+
+		await Assert.ThrowsAsync<ClaimNotHeldException>( () => CompleteAsync( job ) );
+	}
+
 	[Fact]
 	public async Task LapsedClaimNotAdoptedStillBelongsToItsHolder()
 	{
@@ -1054,6 +1152,9 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 				() => denied.RenewClaimAsync( job.Context.Run, "unauthorized-worker", 1 ) );
 
 		await Assert.ThrowsAsync<NotAuthorized>(
+				() => denied.AbandonClaimAsync( job.Context.Run, "unauthorized-worker", 1 ) );
+
+		await Assert.ThrowsAsync<NotAuthorized>(
 				() => denied.ReportCompletionAsync(
 						job.Context.Run, "unauthorized-worker", 1, RunResults.Succeeded,
 						new JobOutcome { Successful = true } ) );
@@ -1073,6 +1174,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		ClaimedJob job = await ClaimSingleAsync( schedule, coordinator: inProcess, claimant: "in-process-worker" );
 
 		Assert.True( await inProcess.RenewClaimAsync( job.Context.Run, "in-process-worker", 1 ) );
+		Assert.True( await inProcess.AbandonClaimAsync( job.Context.Run, "in-process-worker", 1 ) );
 
 		await inProcess.ReportCompletionAsync(
 				job.Context.Run, "in-process-worker", 1, RunResults.Succeeded,

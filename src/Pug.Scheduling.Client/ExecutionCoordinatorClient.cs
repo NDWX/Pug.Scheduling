@@ -67,6 +67,13 @@ public class ExecutionCoordinatorClient : ApiClient, IExecutionCoordinator
 						RunPath( run, "leaseRenewal" ), new object(), queries: CallerQuery( claimant, worker ) )
 			);
 
+	public Task<bool> AbandonClaimAsync( string run, string claimant, int worker ) =>
+		ApiFailures.TranslateAsync(
+				// A claim that is not held comes back as false, not as a failure status.
+				() => HttpClient.PostAsync<object, bool>(
+						RunPath( run, "abandonment" ), new object(), queries: CallerQuery( claimant, worker ) )
+			);
+
 	public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome ) =>
 		ApiFailures.TranslateAsync(
 				async () =>
