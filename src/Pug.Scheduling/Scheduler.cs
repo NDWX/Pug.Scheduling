@@ -217,8 +217,16 @@ namespace Pug.Scheduling
 			if( string.IsNullOrWhiteSpace( domain ) )
 				throw new ArgumentException( "Value cannot be null or whitespace.", nameof(domain) );
 
-			// Listing one's own schedules requires no ACL grant; any broader listing does.
-			if( owner?.Identifier != CurrentUserIdentifier )
+			// A given owner is a full principal: the store matches its type and its identifier, so
+			// a missing half would silently match nothing.
+			if( owner is not null && ( string.IsNullOrWhiteSpace( owner.Type ) ||
+										string.IsNullOrWhiteSpace( owner.Identifier ) ) )
+				throw new ArgumentException( "Owner type and identifier cannot be null or whitespace.", nameof(owner) );
+
+			// Listing one's own schedules requires no ACL grant; any broader listing does. "Own"
+			// is the owner rule (a USER principal with the caller's identifier): a principal of
+			// another type that shares the identifier is someone else's.
+			if( !IsCurrentUser( owner ) )
 				await CheckAuthorizationAsync( SecurityOperations.List, ResourceQualifiers.AnySchedule( domain ) )
 					.ConfigureAwait( false );
 

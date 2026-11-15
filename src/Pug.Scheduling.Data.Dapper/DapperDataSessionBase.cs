@@ -255,14 +255,14 @@ namespace Pug.Scheduling.Data.Dapper
 			string filter = "domain = @domain";
 
 			if( owner is not null )
-				filter += " and owner = @owner";
+				filter += " and ownerType = @ownerType and owner = @owner";
 
 			if( jobType is not null )
 				filter += " and jobType = @jobType";
 
 			IEnumerable<ScheduleRow> rows = await Connection.QueryAsync<ScheduleRow>(
 													$"select {ScheduleColumns} from schedule where {filter} order by name;",
-													new { domain, owner = owner?.Identifier, jobType }
+													new { domain, ownerType = owner?.Type, owner = owner?.Identifier, jobType }
 												).ConfigureAwait( false );
 
 			return rows.Select( Compose ).ToList();

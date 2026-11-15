@@ -41,8 +41,8 @@ namespace Pug.Scheduling.Data.Abstractions
 		// (the run finished, or it and its schedule were deleted). rowLock as for GetScheduleAsync.
 		Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, RowLock rowLock = RowLock.None );
 
-		// Lists schedules within a domain, optionally filtered by owner principal and/or job
-		// type. Never crosses domains.
+		// Lists schedules within a domain, optionally filtered by owner principal (type and
+		// identifier) and/or job type. Never crosses domains.
 		Task<IEnumerable<ScheduleInfo>> GetSchedulesAsync( string domain, Reference? owner = null, string? jobType = null );
 
 		// Identifiers of at most maximumSchedules enabled, unpaused schedules (of jobType, when not

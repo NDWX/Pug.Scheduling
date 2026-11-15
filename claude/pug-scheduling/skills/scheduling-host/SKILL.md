@@ -175,7 +175,7 @@ What is checked (constants in `Pug.Scheduling.Abstractions`: `SecurityOperations
 
 | Call | Operation(s) | Resource (`NounQualifier`) | Not checked when |
 |---|---|---|---|
-| List a domain's schedules | `LIST` | `{ Domain, Type = "SCHEDULE" }` | the `owner` filter's identifier is the caller's |
+| List a domain's schedules | `LIST` | `{ Domain, Type = "SCHEDULE" }` | the `owner` filter is the caller as `USER` (`{ Type = "USER", Identifier = caller }`) |
 | Read, update, delete, pause, resume, run-now, read runs | `GET_INFO`, `SET_DEFINITION`, `DELETE`, `PAUSE`, `RESUME`, `RUN_NOW`, `GET_RUN_HISTORY` | `{ Domain, Type = "SCHEDULE", Identifier = schedule }` | the caller owns it (**owner rule**: `Owner.Type == "USER"` and `Owner.Identifier` is the caller's) |
 | Register for another owner | `CREATE_ON_BEHALF` | `{ Domain = definition's, Type = owner.Type, Identifier = owner.Identifier }` | the owner is omitted or is the caller. There is no `CREATE` operation: registering for oneself needs no grant |
 | Claim, renew, abandon, complete | `CLAIM_JOBS`, `RENEW_CLAIM`, `ABANDON_CLAIM`, `REPORT_COMPLETION` | `{ Type = "EXECUTION_COORDINATOR", Identifier = claimant }`, no domain | `CurrentPrincipal` is null |
