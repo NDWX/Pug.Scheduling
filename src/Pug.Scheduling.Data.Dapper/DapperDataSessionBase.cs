@@ -9,10 +9,10 @@ namespace Pug.Scheduling.Data.Dapper
 {
 	// The schedule store's SQL and row mapping, shared by every Dapper provider. A provider
 	// subclasses it with its dialect: the boolean predicates (written as in its partial indexes),
-	// the clause that locks a row read, its current-time expression, and how stored timestamps are
-	// read back. Everything else - statements,
-	// parameters, the flat row shape and its composition into ScheduleInfo - is written once
-	// here. The schema scripts stay with each provider's DapperData.
+	// the clause that locks a row read in each RowLock mode, its current-time expression, and how
+	// stored timestamps are read back. Everything else - statements, parameters, the flat row
+	// shape and its composition into ScheduleInfo - is written once here. The schema scripts stay
+	// with each provider's DapperData.
 	//
 	// Storage primitives only: no statement here decides anything (see IDataSession).
 	public abstract class DapperDataSessionBase : ApplicationDataSession, IDataSession
@@ -38,9 +38,10 @@ namespace Pug.Scheduling.Data.Dapper
 		// the provider's partial request index.
 		protected abstract string RunRequestedPredicate { get; }
 
-		// Appended to a row read that must hold the row's write lock until the unit ends, or empty
-		// when the provider's write unit already serializes writers (SQLite's BEGIN IMMEDIATE).
-		protected abstract string LockingReadClause { get; }
+		// Appended to a row read to lock the row in the given mode (see RowLock) until the unit
+		// ends: empty for RowLock.None, and empty in every mode when the provider's write unit
+		// already serializes writers (SQLite's BEGIN IMMEDIATE).
+		protected abstract string LockingReadClause( RowLock rowLock );
 
 		// SQL expression for the database's current time at the best precision it offers, read at
 		// evaluation rather than fixed at transaction start (see IDataSession.GetCurrentTimeAsync).
@@ -64,8 +65,12 @@ namespace Pug.Scheduling.Data.Dapper
 					Finished = ReadTimestamp( run.Finished )
 				};
 
-		private string LockClause( bool lockRow ) =>
-			lockRow && !string.IsNullOrEmpty( LockingReadClause ) ? " " + LockingReadClause : string.Empty;
+		private string LockClause( RowLock rowLock )
+		{
+			string clause = LockingReadClause( rowLock );
+
+			return string.IsNullOrEmpty( clause ) ? string.Empty : " " + clause;
+		}
 
 		// == Row shape ==
 
@@ -224,20 +229,20 @@ namespace Pug.Scheduling.Data.Dapper
 				);
 		}
 
-		public async Task<ScheduleInfo?> GetScheduleAsync( string identifier, bool lockRow = false )
+		public async Task<ScheduleInfo?> GetScheduleAsync( string identifier, RowLock rowLock = RowLock.None )
 		{
 			ScheduleRow? row = await Connection.QueryFirstOrDefaultAsync<ScheduleRow?>(
-									$"select {ScheduleColumns} from schedule where identifier = @identifier{LockClause( lockRow )};",
+									$"select {ScheduleColumns} from schedule where identifier = @identifier{LockClause( rowLock )};",
 									new { identifier }
 								).ConfigureAwait( false );
 
 			return row is null ? null : Compose( row );
 		}
 
-		public async Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, bool lockRow = false )
+		public async Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, RowLock rowLock = RowLock.None )
 		{
 			ScheduleRow? row = await Connection.QueryFirstOrDefaultAsync<ScheduleRow?>(
-									$"select {ScheduleColumns} from schedule where activeRun = @run{LockClause( lockRow )};",
+									$"select {ScheduleColumns} from schedule where activeRun = @run{LockClause( rowLock )};",
 									new { run }
 								).ConfigureAwait( false );
 

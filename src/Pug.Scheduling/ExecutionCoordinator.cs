@@ -193,7 +193,8 @@ namespace Pug.Scheduling
 			}
 
 			// Every candidate failed: that is a fault, not an idle window, so it is not reported as
-			// "no work" — the worker sees the failure.
+			// "no work" — the worker sees the failure. A candidate passed over because a peer holds
+			// its row is handled, not failed: it returned null without an exception.
 			if( lastFailure is not null && !anyCandidateHandled )
 				ExceptionDispatchInfo.Capture( lastFailure ).Throw();
 
@@ -226,13 +227,29 @@ namespace Pug.Scheduling
 		}
 
 		// Classifies the locked schedule and applies the transition it calls for. Null when there
-		// is no job to hand out: the candidate no longer qualifies, or its occurrence was skipped.
+		// is no job to hand out: the candidate's row is held by another unit or gone, it no longer
+		// qualifies, or its occurrence was skipped.
 		private async Task<ClaimedJob> ClaimAsync( IDataSession session, string identifier, Caller caller )
 		{
-			ScheduleInfo schedule = await session.GetScheduleAsync( identifier, lockRow: true ).ConfigureAwait( false );
+			// The one locking read that skips instead of waiting (#14); every other transition waits.
+			// Concurrent claims read the same window in the same order, so waiting would queue every
+			// coordinator behind the first candidate's holder, usually only to find it claimed.
+			// Passing over a held row is safe for a claim alone: nothing is decided on the row, the
+			// next candidate is as good, and a row still due after its holder commits is claimed at a
+			// later poll. When every candidate of the window is held, the claim reports no work and
+			// the worker polls again after its PollInterval. SQLite skips nothing: its write unit
+			// holds the database's write lock, so the claim waits for the peer's whole unit instead.
+			ScheduleInfo schedule = await session.GetScheduleAsync( identifier, RowLock.SkipLocked ).ConfigureAwait( false );
 
 			if( schedule is null )
+			{
+				_logger.LogDebug(
+						"Due candidate {Schedule} passed over by claimant {Claimant} worker {Worker}: another unit holds " +
+						"its row (a peer claiming or completing it, or a management write), or it was deleted since the due read.",
+						identifier, caller.Claimant, caller.Worker );
+
 				return null;
+			}
 
 			// After the lock: the decision is made on the row as locked, at the time it was locked.
 			DateTime now = await _clock.GetUtcNowAsync( session ).ConfigureAwait( false );
@@ -430,7 +447,9 @@ namespace Pug.Scheduling
 		private async Task<bool> SetHeldLeaseExpiryAsync( IDataSession session, string run, Caller caller,
 														string action, TimeSpan expiresIn )
 		{
-			ScheduleInfo schedule = await session.GetScheduleByActiveRunAsync( run, lockRow: true ).ConfigureAwait( false );
+			// Waits for a concurrent holder of the row, never skips it: a held row would read as no
+			// active run, and the worker would abandon a run it still owns.
+			ScheduleInfo schedule = await session.GetScheduleByActiveRunAsync( run, RowLock.Wait ).ConfigureAwait( false );
 
 			ExecutionLease lease = schedule?.ExecutionLease;
 
@@ -514,7 +533,9 @@ namespace Pug.Scheduling
 		private async Task<(ScheduleInfo, ScheduleRun)> ResolveCompletionAsync( IDataSession session, string run,
 																				Caller caller )
 		{
-			ScheduleInfo schedule = await session.GetScheduleByActiveRunAsync( run, lockRow: true ).ConfigureAwait( false );
+			// Waits for a concurrent holder of the row, never skips it: a held row would read as a
+			// run no longer active, and a completion the reporter is entitled to would be refused.
+			ScheduleInfo schedule = await session.GetScheduleByActiveRunAsync( run, RowLock.Wait ).ConfigureAwait( false );
 
 			ScheduleRun record = await session.GetRunAsync( run ).ConfigureAwait( false );
 

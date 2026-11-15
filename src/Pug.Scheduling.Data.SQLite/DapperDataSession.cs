@@ -1,6 +1,7 @@
 using System.Data;
 using System.Transactions;
 using Microsoft.Data.Sqlite;
+using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.Data.Dapper;
 
 namespace Pug.Scheduling.Data.SQLite
@@ -20,9 +21,12 @@ namespace Pug.Scheduling.Data.SQLite
 
 		protected override string RunRequestedPredicate => "runRequested = 1";
 
-		// A write unit is BEGIN IMMEDIATE, which already holds the database write lock; SQLite has
-		// no row locks (and no 'for update').
-		protected override string LockingReadClause => string.Empty;
+		// No clause in any mode. A write unit is BEGIN IMMEDIATE, which holds the database write lock
+		// from BEGIN, so writers queue for the whole database before their first read and no two
+		// units ever contend for a row: there is nothing for RowLock.Wait to wait on, and nothing
+		// for RowLock.SkipLocked to skip (a claim on SQLite never passes over a row a peer holds; it
+		// waits for the peer's whole unit instead). SQLite has no row locks, and no 'for update'.
+		protected override string LockingReadClause( RowLock rowLock ) => string.Empty;
 
 		// UTC to the millisecond, SQLite's finest ('%f' is seconds with three decimals), as text like
 		// the stored timestamps; ReadTimestamp stamps it UTC like them. 'now' is evaluated per

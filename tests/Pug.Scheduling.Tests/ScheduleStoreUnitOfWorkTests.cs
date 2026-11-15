@@ -125,7 +125,7 @@ public abstract class ScheduleStoreUnitOfWorkTests<TScheduleDatabase>
 		_database.ApplicationData.WriteAsync(
 				async ( session, context ) =>
 				{
-					ScheduleInfo current = ( await session.GetScheduleAsync( context, lockRow: true ) )!;
+					ScheduleInfo current = ( await session.GetScheduleAsync( context, RowLock.Wait ) )!;
 
 					int next = current.State.Attempt + 1;
 
