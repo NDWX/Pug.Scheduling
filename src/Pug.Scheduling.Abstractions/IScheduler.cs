@@ -19,7 +19,8 @@ namespace Pug.Scheduling.Abstractions
 		// Registers a new schedule and returns its identifier. owner is the principal on whose
 		// behalf the job executes, defaulting to the current security principal when omitted;
 		// registering a schedule for oneself requires no ACL grant, while registering on behalf
-		// of another principal requires the CREATE grant. The definition is validated
+		// of another principal requires the CREATE_ON_BEHALF grant on that principal (the owner's
+		// type and identifier) in the definition's domain. The definition is validated
 		// (recurrence well-formed, known time zone, registered job type, payload accepted by the
 		// job type's IJobPayloadValidator when registered); omitted policies and timeout are
 		// assigned service-level defaults. The schedule starts enabled with its first occurrence

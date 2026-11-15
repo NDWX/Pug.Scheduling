@@ -1,4 +1,5 @@
 using Pug.Application.Security;
+using Pug.Effable;
 using Pug.Scheduling.Abstractions;
 
 namespace Pug.Scheduling
@@ -16,6 +17,15 @@ namespace Pug.Scheduling
 			Domain = domain,
 			Type = SecurityObjectTypes.Schedule,
 			Identifier = identifier
+		};
+
+		// The owner principal a schedule is registered for, in the schedule's domain: owner types
+		// map directly onto security object types.
+		public static NounQualifier Principal( string domain, Reference principal ) => new NounQualifier
+		{
+			Domain = domain,
+			Type = principal.Type,
+			Identifier = principal.Identifier
 		};
 
 		// Execution is not domain-scoped: a worker serves every domain the scheduler hosts, so

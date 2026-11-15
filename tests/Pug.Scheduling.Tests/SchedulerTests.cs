@@ -220,6 +220,56 @@ public abstract class SchedulerTests<TScheduleDatabase>
 		await Assert.ThrowsAsync<NotAuthorized>( () => intruder.DeleteAsync( identifier ) );
 	}
 
+	private IScheduler CreateGrantedScheduler( TestAuthorizations authorizations ) =>
+		CreateScheduler(
+				SecurityManagerFactory.CreateContextual(
+						() => OwnerUser,
+						( user, operation, resource ) => authorizations.IsGranted( user, operation, resource ) ) );
+
+	[Fact]
+	public async Task RegisteringOnBehalfWithGrantForThatOwnerCreatesTheSchedule()
+	{
+		TestAuthorizations authorizations = new();
+		authorizations.Grant( OwnerUser, SecurityOperations.CreateOnBehalf, "USER", Domain, "other-user" );
+
+		string identifier = await CreateGrantedScheduler( authorizations )
+			.RegisterAsync( NewDefinition(), User( "other-user" ) );
+
+		ScheduleInfo schedule = await _scheduler.GetScheduleAsync( identifier );
+
+		Assert.Equal( "USER", schedule.Owner.Type );
+		Assert.Equal( "other-user", schedule.Owner.Identifier );
+	}
+
+	[Fact]
+	public async Task RegisteringOnBehalfWithoutGrantIsDenied()
+	{
+		IScheduler scheduler = CreateGrantedScheduler( new TestAuthorizations() );
+
+		await Assert.ThrowsAsync<NotAuthorized>( () => scheduler.RegisterAsync( NewDefinition(), User( "other-user" ) ) );
+	}
+
+	[Fact]
+	public async Task OnBehalfGrantForAnotherIdentifierTypeOrDomainIsDenied()
+	{
+		TestAuthorizations authorizations = new();
+		authorizations.Grant( OwnerUser, SecurityOperations.CreateOnBehalf, "USER", Domain, "someone-else" );
+		authorizations.Grant( OwnerUser, SecurityOperations.CreateOnBehalf, "GROUP", Domain, "other-user" );
+		authorizations.Grant( OwnerUser, SecurityOperations.CreateOnBehalf, "USER", "tenant-2", "other-user" );
+
+		IScheduler scheduler = CreateGrantedScheduler( authorizations );
+
+		await Assert.ThrowsAsync<NotAuthorized>( () => scheduler.RegisterAsync( NewDefinition(), User( "other-user" ) ) );
+	}
+
+	[Fact]
+	public async Task SelfRegistrationNeedsNoOnBehalfGrant()
+	{
+		string identifier = await CreateGrantedScheduler( new TestAuthorizations() ).RegisterAsync( NewDefinition() );
+
+		Assert.Equal( OwnerUser, ( await _scheduler.GetScheduleAsync( identifier ) ).Owner.Identifier );
+	}
+
 	[Fact]
 	public async Task InvalidRegistrationsAreRejected()
 	{

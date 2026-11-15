@@ -45,7 +45,7 @@ it to the current security principal. Immutable thereafter (not updatable becaus
 not in the definition). Owner rule (`SchedulerBase.IsCurrentUser`): matches only
 `Owner.Type == "USER" && Owner.Identifier == CurrentUserIdentifier` (user tightened the Type
 check). The rule covers **creating one's own schedules** (no ACL grant needed) and view/modify/
-delete of owned schedules; registering on behalf of another principal requires the CREATE grant;
+delete of owned schedules; registering on behalf of another principal requires the CREATE_ON_BEHALF grant (D26);
 all other access falls through to Pug.Authorized ACLs with domain-qualified `NounQualifier`.
 Security constants (`SecurityObjectTypes`, `SecurityOperations`) live in **Abstractions** — user
 overrode the Corea precedent (core project): consumer-usable constants belong with abstractions.
@@ -627,6 +627,19 @@ past its timeout, past claim loss, and past shutdown.
   `SchedulerOptions.DefaultTimeout`) with `ArgumentException` (400), and the worker fails a run whose
   claimed timeout is out of range (a remote coordinator is not trusted) rather than letting it stop
   the host. `WorkerOptions` durations are validated likewise (D20).
+
+## D26 — Registering on behalf requires CREATE_ON_BEHALF on the owner principal (#16)
+
+The on-behalf check used to be `CREATE` on the schedule object type in the domain, so anyone allowed
+to create schedules could create them for **any** principal.
+
+- Registering for an owner who is not the current USER checks **`CREATE_ON_BEHALF`** against a
+  `NounQualifier` of `Type = owner.Type`, `Identifier = owner.Identifier`, `Domain =
+  definition.Domain` (`ResourceQualifiers.Principal`). The caller needs an explicit grant to act
+  for that principal, in that domain.
+- **`CREATE` is removed**, not kept alongside: it was used only there. Self-registration still
+  needs no grant (owner rule).
+- Owner types map directly onto security object types; no mapping table.
 
 ## Verification conventions
 

@@ -167,10 +167,11 @@ namespace Pug.Scheduling
 				throw new ArgumentException( "Owner principal identifier is required.", nameof(owner) );
 
 			// Owner rule extends to creation: registering a schedule for oneself requires no ACL
-			// grant; registering on behalf of another principal does.
+			// grant; registering on behalf of another principal requires a CREATE_ON_BEHALF grant
+			// on that principal in the schedule's domain.
 			if( !IsCurrentUser( owner ) )
 				await CheckAuthorizationAsync(
-							SecurityOperations.Create, ResourceQualifiers.AnySchedule( definition.Domain ) )
+							SecurityOperations.CreateOnBehalf, ResourceQualifiers.Principal( definition.Domain, owner ) )
 					.ConfigureAwait( false );
 
 			ScheduleInfo schedule = new()

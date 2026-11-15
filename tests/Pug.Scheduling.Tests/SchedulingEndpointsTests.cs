@@ -79,7 +79,7 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
-	public async Task RegisteringForAnotherPrincipalRequiresCreateGrant()
+	public async Task RegisteringForAnotherPrincipalRequiresCreateOnBehalfGrant()
 	{
 		using HttpClient denied = _fixture.CreateClient( OtherUser );
 
@@ -90,7 +90,7 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 		Assert.Equal( HttpStatusCode.Forbidden, response.StatusCode );
 
 		_fixture.Authorizations.Grant(
-				DomainAdmin, SecurityOperations.Create, SecurityObjectTypes.Schedule, SchedulingApiFixture.Domain );
+				DomainAdmin, SecurityOperations.CreateOnBehalf, "USER", SchedulingApiFixture.Domain, Owner );
 
 		using HttpClient granted = _fixture.CreateClient( DomainAdmin );
 

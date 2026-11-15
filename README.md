@@ -157,7 +157,9 @@ Facades authorize; endpoints only require authentication and translate outcomes.
 
 - **Schedules** — the owner rule first: the schedule's `Owner` may create their own schedules and
   view, modify, and delete them with no ACL grant. Everyone else falls through to role-based
-  Pug.Authorized ACLs on `SecurityObjectTypes.Schedule`, qualified by domain.
+  Pug.Authorized ACLs on `SecurityObjectTypes.Schedule`, qualified by domain. Registering on behalf
+  of another owner is checked as `CREATE_ON_BEHALF` against the **owner principal** (its type and
+  identifier as the object type and identifier) in the schedule's domain.
 - **Execution** — `CoordinatorSecurityOperations` on `SecurityObjectTypes.ExecutionCoordinator`,
   qualified by the **claimant identity being acted as**, so one worker cannot claim or complete
   runs as another. A call arriving with no security principal at all is in-process by construction

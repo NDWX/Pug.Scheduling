@@ -1,11 +1,12 @@
 namespace Pug.Scheduling.Abstractions
 {
-	// Operations checked against SecurityObjectTypes.Schedule, one per IScheduler capability.
-	// The definition's Owner principal is exempt: owners may always perform these operations on
-	// their own schedules without an ACL grant.
+	// Operations checked against SecurityObjectTypes.Schedule, one per IScheduler capability,
+	// except CreateOnBehalf, which is checked against the owner principal (the owner's Type and
+	// Identifier) in the schedule's domain. The definition's Owner principal is exempt: owners
+	// may always perform these operations on their own schedules without an ACL grant.
 	public static class SecurityOperations
 	{
-		public static string Create => "CREATE";
+		public static string CreateOnBehalf => "CREATE_ON_BEHALF";
 
 		public static string List => "LIST";
 
