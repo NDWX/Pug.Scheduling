@@ -387,7 +387,41 @@ namespace Pug.Scheduling
 		// Extends the lease while the schedule still names this run and this holder. Expiry is not
 		// checked: a lapsed lease nobody adopted is still the holder's own (as a restarted holder
 		// re-takes its own live one). False tells the worker to abandon the run.
-		private async Task<bool> RenewAsync( IDataSession session, string run, Caller caller )
+		private Task<bool> RenewAsync( IDataSession session, string run, Caller caller ) =>
+			SetHeldLeaseExpiryAsync( session, run, caller, "renewal", UtcNow + _options.LeaseDuration );
+
+		// == Abandon ==
+
+		public async Task<bool> AbandonClaimAsync( string run, string claimant, int worker )
+		{
+			Caller caller = ValidateCaller( claimant, worker );
+
+			ValidateRun( run );
+
+			await CheckAuthorizationAsync( CoordinatorSecurityOperations.AbandonClaim, caller ).ConfigureAwait( false );
+
+			bool abandoned = await InUnitAsync( session => AbandonAsync( session, run, caller ) ).ConfigureAwait( false );
+
+			if( abandoned )
+				_logger.LogInformation(
+						"Claimant {Claimant} worker {Worker} abandoned run {Run}; a peer may adopt it at its next claim.",
+						caller.Claimant, caller.Worker, run );
+
+			return abandoned;
+		}
+
+		// Expires the lease now, leaving the run and its holder in place: the next claim by any
+		// worker classifies the run as an adoption (D9), and the holder's own late completion is
+		// still accepted until then (a lapsed claim nobody adopted is the holder's own).
+		private Task<bool> AbandonAsync( IDataSession session, string run, Caller caller ) =>
+			SetHeldLeaseExpiryAsync( session, run, caller, "abandonment", UtcNow );
+
+		// Locks the schedule whose active run is run and, only if the caller holds it, rewrites
+		// the lease with the given expiry. Expiry is not checked: a lapsed lease nobody adopted is
+		// still the holder's own (as a restarted holder re-takes its own live one). False means
+		// the claim is not held.
+		private async Task<bool> SetHeldLeaseExpiryAsync( IDataSession session, string run, Caller caller,
+														string action, DateTime expiry )
 		{
 			ScheduleInfo schedule = await session.GetScheduleByActiveRunAsync( run, lockRow: true ).ConfigureAwait( false );
 
@@ -396,16 +430,15 @@ namespace Pug.Scheduling
 			if( lease?.ClaimedBy != caller.Holder )
 			{
 				_logger.LogWarning(
-						"Refused renewal of run {Run}: claimant {Claimant} worker {Worker} no longer holds it " +
+						"Refused {Action} of run {Run}: claimant {Claimant} worker {Worker} no longer holds it " +
 						"(the run is {RunState}).",
-						run, caller.Claimant, caller.Worker,
+						action, run, caller.Claimant, caller.Worker,
 						lease is null ? "not in progress" : $"held by {lease.ClaimedBy}" );
 
 				return false;
 			}
 
-			await session.SetExecutionAsync( schedule.Identifier, lease with { Expiry = UtcNow + _options.LeaseDuration } )
-						.ConfigureAwait( false );
+			await session.SetExecutionAsync( schedule.Identifier, lease with { Expiry = expiry } ).ConfigureAwait( false );
 
 			return true;
 		}

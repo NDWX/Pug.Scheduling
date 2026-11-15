@@ -301,6 +301,8 @@ namespace Pug.Scheduling.Worker
 
 				if( report is not null )
 					await ReportAsync( job, report, stopwatch ).ConfigureAwait( false );
+				else if( finished && ReleasesClaimOnAbandon( cancellation ) )
+					await TryAbandonClaimAsync( job ).ConfigureAwait( false );
 			}
 			finally
 			{
@@ -447,6 +449,35 @@ namespace Pug.Scheduling.Worker
 					"Worker {Claimant}/{Worker} abandoned run {Run} of schedule {Schedule}: {Reason}{Detail}.",
 					_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
 					cancellation.ClaimLost ? "claim lost" : "host stopping", detail );
+
+		// Whether an unreported run should have its claim released: only when the host is stopping
+		// and the handler has stopped. A lost claim holds nothing to release, and a detached
+		// handler is still running, so its claim must lapse rather than let a peer adopt the run.
+		private static bool ReleasesClaimOnAbandon( RunCancellation cancellation ) =>
+			cancellation.HostStopping && !cancellation.ClaimLost;
+
+		// Best effort: releases the claim so a peer adopts the run without waiting for the lease,
+		// bounded by AbandonTimeout. A failure only means the lease lapses on its own.
+		private async Task TryAbandonClaimAsync( ClaimedJob job )
+		{
+			try
+			{
+				bool released = await _coordinator.AbandonClaimAsync( job.Context.Run, _options.Claimant, _worker )
+												.WaitAsync( _options.AbandonTimeout ).ConfigureAwait( false );
+
+				_logger.LogInformation(
+						"Worker {Claimant}/{Worker} released its claim on run {Run} of schedule {Schedule}: {Released}.",
+						_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
+						released ? "peers may adopt it now" : "it was no longer held" );
+			}
+			catch( Exception exception )
+			{
+				_logger.LogWarning( exception,
+									"Worker {Claimant}/{Worker} could not release its claim on run {Run} of schedule {Schedule}; " +
+									"it lapses with the lease.",
+									_options.Claimant, _worker, job.Context.Run, job.Context.Schedule );
+			}
+		}
 
 		// Leaves a handler that ignored cancellation to end on its own. Its run's cancellation and
 		// the handler itself (disposed by RunHandlerAsync) are released when it ends.

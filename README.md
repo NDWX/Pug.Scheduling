@@ -46,7 +46,10 @@ occurrence is adopted again once its lease lapses: execution is **at-least-once*
 should key side effects on `(Schedule, ScheduledFor)`. Lease expiry is judged by each scheduler
 host's clock, so `LeaseDuration` must exceed the clock skew between hosts. A handler must honour
 its cancellation token: one that does not is detached after `CancellationGrace` and may still be
-running when its occurrence is retried.
+running when its occurrence is retried. On a graceful shutdown a worker whose handler has stopped
+releases its claim (`AbandonClaimAsync`, grant `ABANDON_CLAIM`, bounded by `WorkerOptions.AbandonTimeout`,
+default 5 s), so a peer adopts the run at once instead of after the lease; a detached handler's
+claim is left to lapse.
 
 Run-now (`POST schedules/{identifier}/run`) only raises a request marker; it never moves the next
 occurrence. It is refused with `RunInProgressException` (409) while a run of the schedule is in

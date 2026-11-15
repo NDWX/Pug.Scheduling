@@ -65,6 +65,7 @@ Regardless of hosting model, workers poll/claim/heartbeat/report exclusively thr
 ```csharp
 Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string jobType ); // null = none due
 Task<bool> RenewClaimAsync( string run, string claimant, int worker );
+Task<bool> AbandonClaimAsync( string run, string claimant, int worker );  // D27
 Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome );
 ```
 
@@ -254,7 +255,7 @@ scheduler host serves more than one scheduling surface at once (user directive).
 | Extension | Package | Routes |
 |---|---|---|
 | `MapSchedulingEndpoints()` | `Pug.Scheduling.WebApi` | `GET/POST schedules`, `GET/PUT/DELETE schedules/{identifier}`, `POST schedules/{identifier}/pause|resume|run`, `GET schedules/{identifier}/runs` |
-| `MapExecutionCoordinatorEndpoints()` | `Pug.Scheduling.WebApi` | `POST executionCoordinator/JobRunClaims`, `POST executionCoordinator/JobRuns/{run}/leaseRenewal?claimant=&worker=`, `POST executionCoordinator/JobRuns/{run}/completion?claimant=&worker=` |
+| `MapExecutionCoordinatorEndpoints()` | `Pug.Scheduling.WebApi` | `POST executionCoordinator/JobRunClaims`, `POST executionCoordinator/JobRuns/{run}/leaseRenewal?claimant=&worker=`, `POST executionCoordinator/JobRuns/{run}/abandonment?claimant=&worker=` (D27), `POST executionCoordinator/JobRuns/{run}/completion?claimant=&worker=` |
 | `MapSchedulerWorkerEndpoints()` | `Pug.Scheduling.Worker.WebApi` | `GET workers`, `GET workers/{worker}`, `POST workers/{worker}/pause|resume` (D20) |
 
 - **Coordinator endpoints are the out-of-process worker's transport** (user directive): the wire
@@ -438,6 +439,8 @@ adds detached handlers, `WorkerInfo.DetachedJobs`, and the `CancellationGrace` a
   multi-targeted endpoints can see it. `WorkerInfo` gains `Worker` and `JobType`. Routes and
   authorization: D15. Grants remain `SCHEDULER_WORKER` qualified by the worker's claimant, so a
   group's workers share them.
+- **Graceful shutdown releases the claim** when the handler has stopped (D27); the worker's
+  `AbandonTimeout` (default 5 s) bounds that call.
 - **Each worker is its own `IHostedService` singleton**, registered as `AddSingleton<IHostedService>(
   provider => registry.Find( number ) )` — the same instance the registry hands to management.
   **Not `AddHostedService( factory )`**: it uses `TryAddEnumerable`, which deduplicates factory
@@ -641,6 +644,40 @@ to create schedules could create them for **any** principal.
   needs no grant (owner rule).
 - Owner types map directly onto security object types; no mapping table.
 
+## D27 — Graceful shutdown releases the claim (#11)
+
+On host shutdown the worker abandoned its run without telling the coordinator, so the claim stayed
+held until the lease lapsed (up to `LeaseDuration`) before a peer could adopt the run.
+
+- **`IExecutionCoordinator.AbandonClaimAsync( run, claimant, worker )`** returns true when the caller
+  held the claim and it was released; false when it is not held (adopted by a peer, run finished,
+  unknown run, schedule deleted). It never throws `ClaimNotHeldException`: abandoning is best effort.
+- **One locked write, same shape as renewal** (D23): lock the schedule by active run, check the
+  holder, write the execution with `Expiry = now`. The run, active-run and holder are untouched, so
+  the next claim by any worker classifies the run as an adoption (D9) and takes over the same run row
+  with its trigger kept. Renewal and abandonment share one helper (`SetHeldLeaseExpiryAsync`); the
+  data session stays free of decisions.
+- **Completion after abandon.** The abandoned lease is merely lapsed, so the holder's own late
+  completion is accepted until a peer adopts the run (the lapsed-but-holder-matches rule, D16/D23),
+  and refused with `ClaimNotHeldException` afterwards. Abandoning is therefore safe to attempt even if
+  the handler's result is still racing in.
+- **New grant `ABANDON_CLAIM`** (`CoordinatorSecurityOperations.AbandonClaim`) on
+  `SecurityObjectTypes.ExecutionCoordinator`, qualified by the claimant like the others; skipped for
+  an in-process caller with no principal. A remote worker host must be granted it, but a host
+  without it merely keeps today's behaviour (the call is refused, logged at Warning, and the lease
+  lapses).
+- **Transport:** `POST executionCoordinator/JobRuns/{run}/abandonment?claimant=&worker=` answers 200
+  with a bool, plus 400 and 403 as for renewal; `ExecutionCoordinatorClient.AbandonClaimAsync`.
+- **The worker releases only when the host is stopping and the handler has stopped** (finished, or
+  honoured cancellation within the grace) and the claim was not lost. A **detached** handler is still
+  running, so releasing would let a peer adopt the run while it executes; its lease is left to lapse
+  (D25's overlap is then bounded by the lease, as before). A lost claim holds nothing to release;
+  timeouts already report TIMED_OUT, which releases the claim.
+- **Best effort, bounded:** the call is limited by `WorkerOptions.AbandonTimeout` (default 5 s,
+  positive, within `TimerBounds.Maximum`), logged at Warning on failure, and never throws out of the
+  pump. It adds at most that bound to a stopping worker, so keep `CancellationGrace + AbandonTimeout`
+  below the host's shutdown timeout.
+
 ## Verification conventions
 
 Completion gate: `dotnet build Pug.Scheduling.slnx -warnaserror -m:1` clean **and**
@@ -677,7 +714,7 @@ Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
   **C** interval grid and per-policy baselines; **D** worker detach, `TimerBounds`; **E** documentation
   reconciliation — **DONE (310 tests)**, awaiting the user's single review (no pause between
   sub-phases, by user decision, for this work only). Closes #7, #8, #9. Follow-ups: **#11**
-  (`AbandonAsync`: graceful shutdown releases the lease), **#12** (database-clock lease expiry),
+  (`AbandonClaimAsync`: graceful shutdown releases the lease; **DONE**, D27), **#12** (database-clock lease expiry),
   **#13** (shared SQLite enlistment package), **#14** (`for update skip locked` on Postgres claims).
 - **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
   handler) still deferred.

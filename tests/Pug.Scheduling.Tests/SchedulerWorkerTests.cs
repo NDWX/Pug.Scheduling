@@ -89,6 +89,19 @@ public class SchedulerWorkerTests
 			return Task.FromResult( Renews );
 		}
 
+		// Runs the worker asked to abandon, in order.
+		public ConcurrentQueue<(string Run, string Claimant, int Worker)> Abandoned { get; } = new();
+
+		// What every abandon does; defaults to releasing the claim.
+		public Func<Task<bool>> OnAbandon { get; init; } = () => Task.FromResult( true );
+
+		public Task<bool> AbandonClaimAsync( string run, string claimant, int worker )
+		{
+			Abandoned.Enqueue( ( run, claimant, worker ) );
+
+			return OnAbandon();
+		}
+
 		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
 		{
 			ReportedBy = ( claimant, worker );
@@ -447,6 +460,131 @@ public class SchedulerWorkerTests
 		Assert.True( cancelled.Task.IsCompleted );
 		Assert.Equal( 0, coordinator.Reports );
 		Assert.Equal( 1, handler.Disposals );
+	}
+
+	[Fact]
+	public async Task ShutdownWithACooperativeHandlerReleasesTheClaimOnce()
+	{
+		TaskCompletionSource started = Signal();
+
+		FakeCoordinator coordinator = new( NewJob() );
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Cooperative( started, Signal() ) ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		await started.Task.WaitAsync( Bound );
+
+		await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		Assert.Equal( [ ( "run-1", "test-worker", 1 ) ], coordinator.Abandoned.ToArray() );
+		Assert.Equal( 0, coordinator.Reports );
+	}
+
+	[Fact]
+	public async Task ShutdownWithADetachedHandlerDoesNotReleaseTheClaim()
+	{
+		TaskCompletionSource started = Signal();
+		TaskCompletionSource release = Signal();
+
+		FakeCoordinator coordinator = new( NewJob() );
+
+		DelegateJobHandler hanging = new(
+				async ( _, _, _ ) =>
+				{
+					started.TrySetResult();
+
+					await release.Task;
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( hanging ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await started.Task.WaitAsync( Bound );
+
+			await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+			Assert.Equal( 1, worker.GetInfo().DetachedJobs );
+			Assert.Empty( coordinator.Abandoned );
+		}
+		finally
+		{
+			release.TrySetResult();
+		}
+	}
+
+	[Fact]
+	public async Task ALostClaimIsNotReleased()
+	{
+		TaskCompletionSource started = Signal();
+		TaskCompletionSource cancelled = Signal();
+
+		FakeCoordinator coordinator = new( NewJob() ) { Renews = false };
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Cooperative( started, cancelled ) ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await cancelled.Task.WaitAsync( Bound );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+		}
+
+		Assert.Empty( coordinator.Abandoned );
+		Assert.Equal( 0, coordinator.Reports );
+	}
+
+	[Fact]
+	public async Task AFailingReleaseDoesNotFaultShutdown()
+	{
+		TaskCompletionSource started = Signal();
+
+		FakeCoordinator coordinator = new( NewJob() )
+		{
+			OnAbandon = () => Task.FromException<bool>( new InvalidOperationException( "unreachable" ) )
+		};
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Cooperative( started, Signal() ) ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		await started.Task.WaitAsync( Bound );
+
+		await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		Assert.Single( coordinator.Abandoned );
+	}
+
+	[Fact]
+	public async Task AHangingReleaseIsGivenUpOnAfterTheAbandonTimeout()
+	{
+		TaskCompletionSource started = Signal();
+
+		FakeCoordinator coordinator = new( NewJob() ) { OnAbandon = () => new TaskCompletionSource<bool>().Task };
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Cooperative( started, Signal() ) ),
+				FastOptions( graceMilliseconds: 10_000 ) with { AbandonTimeout = TimeSpan.FromMilliseconds( 100 ) } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		await started.Task.WaitAsync( Bound );
+
+		await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		Assert.Single( coordinator.Abandoned );
 	}
 
 	[Fact]
@@ -905,8 +1043,21 @@ public class SchedulerWorkerTests
 		Assert.Null( options.JobType );
 		Assert.Equal( TimeSpan.FromSeconds( 10 ), options.CancellationGrace );
 		Assert.Equal( 2, options.MaxDetachedHandlers );
+		Assert.Equal( TimeSpan.FromSeconds( 5 ), options.AbandonTimeout );
 
 		options.Validate();
+	}
+
+	[Theory]
+	[InlineData( 0 )]
+	[InlineData( -1 )]
+	public void NonPositiveAbandonTimeoutIsRejected( int milliseconds )
+	{
+		WorkerOptions options = new() { Claimant = "host", AbandonTimeout = TimeSpan.FromMilliseconds( milliseconds ) };
+
+		ArgumentException exception = Assert.Throws<ArgumentException>( options.Validate );
+
+		Assert.Equal( nameof(WorkerOptions.AbandonTimeout), exception.ParamName );
 	}
 
 	[Theory]

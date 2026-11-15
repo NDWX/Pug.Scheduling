@@ -37,6 +37,8 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 
 		public Task<bool> RenewClaimAsync( string run, string claimant, int worker ) => Task.FromResult( false );
 
+		public Task<bool> AbandonClaimAsync( string run, string claimant, int worker ) => Task.FromResult( false );
+
 		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome ) =>
 			Task.CompletedTask;
 	}

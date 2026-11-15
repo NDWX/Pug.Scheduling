@@ -39,6 +39,12 @@ namespace Pug.Scheduling.Worker
 		// stops claiming until one ends. At least 1.
 		public int MaxDetachedHandlers { get; init; } = 2;
 
+		// How long the worker waits for the coordinator to release a claim it abandons on a
+		// graceful shutdown. Best effort: past this the call is given up on (the lease then lapses
+		// on its own), so it bounds the delay this adds to the host's shutdown. Positive, and
+		// within TimerBounds.Maximum.
+		public TimeSpan AbandonTimeout { get; init; } = TimeSpan.FromSeconds( 5 );
+
 		/// <summary>
 		/// Throws <see cref="ArgumentException"/> (naming the offending property) unless
 		/// <see cref="Claimant"/> is neither blank nor contains '/', <see cref="Workers"/> is at
@@ -70,6 +76,10 @@ namespace Pug.Scheduling.Worker
 			if( CancellationGrace < TimeSpan.Zero )
 				throw new ArgumentException( "Cancellation grace must not be negative.", nameof(CancellationGrace) );
 
+			if( AbandonTimeout <= TimeSpan.Zero )
+				throw new ArgumentException( "Abandon timeout must be positive.", nameof(AbandonTimeout) );
+
+			ValidateWithinTimerBounds( AbandonTimeout, nameof(AbandonTimeout) );
 			ValidateWithinTimerBounds( PollInterval, nameof(PollInterval) );
 			ValidateWithinTimerBounds( HeartbeatInterval, nameof(HeartbeatInterval) );
 			ValidateWithinTimerBounds( CancellationGrace, nameof(CancellationGrace) );
