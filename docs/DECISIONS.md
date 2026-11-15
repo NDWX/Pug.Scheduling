@@ -201,6 +201,17 @@ changes `nextRun` only when the schedule is idle (`attempt = 0`, no run active) 
 changed; during a run it leaves `nextRun` alone and the completion applies the new recurrence
 (`DefinitionRules.NextRunAfterUpdate`).
 
+**Amended (#33):** every schedule duration (`Interval`, `Threshold`, `Backoff`, `Timeout`) must be
+whole seconds, because the stores keep whole-second columns and truncated a fraction silently (a
+sub-second interval became zero and divided by zero at completion). `Scheduler` and
+`RecurrenceCalculator.Validate` reject a fraction with `ArgumentException` (400), through one shared
+rule (`DurationRules`). Minimums: interval and timeout at least 1 s (a zero timeout still means
+"omitted", replaced by `DefaultTimeout`, so a stored timeout is never zero), backoff not negative.
+`SchedulerOptions.MinimumMisfireThreshold` (default 15 s) is a floor on every `MisfirePolicy.Threshold`
+and on the default; a smaller one would turn every claim into a misfire. The `Scheduler` constructor
+validates the options (whole seconds, defaults within their minimums). `RecurrenceCalculator` throws
+`InvalidOperationException` for a non-positive interval read from a row written before validation.
+
 ## D13 — Job types: schedulable vs executable
 
 `IJobTypeRegistry` (Abstractions) separates what is *schedulable* at the API host from what is

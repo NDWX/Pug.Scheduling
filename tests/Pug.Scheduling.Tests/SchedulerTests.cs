@@ -23,13 +23,14 @@ public abstract class SchedulerTests<TScheduleDatabase>
 		_scheduler = CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ) );
 	}
 
-	private IScheduler CreateScheduler( ISecurityManager securityManager, TimeProvider? timeProvider = null ) =>
+	private IScheduler CreateScheduler( ISecurityManager securityManager, TimeProvider? timeProvider = null,
+										SchedulerOptions? options = null ) =>
 		new Scheduler(
 				new SequentialIdGenerator( "schedule" ),
 				_scheduleDatabase.ApplicationData,
 				securityManager,
 				new FakeJobTypeRegistry( "test" ),
-				new SchedulerOptions(),
+				options ?? new SchedulerOptions(),
 				new TimeProviderClock( timeProvider ?? TimeProvider.System ) );
 
 	private static ScheduleDefinition NewDefinition( string jobType = "test", string name = "Test schedule",
@@ -348,18 +349,21 @@ public abstract class SchedulerTests<TScheduleDatabase>
 		await Assert.ThrowsAsync<UnknownScheduleException>( () => _scheduler.GetScheduleAsync( "missing" ) );
 	}
 
+	private static readonly TimeSpan WholeSecondsBound = TimeSpan.FromSeconds( Math.Floor( TimerBounds.Maximum.TotalSeconds ) );
+
 	[Fact]
 	public async Task TimeoutBeyondTheTimerBoundIsRejected()
 	{
-		ScheduleDefinition definition = NewDefinition() with { Timeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) };
+		// The bound (2^32-2 ms) is not itself whole seconds, so the whole-second limits straddle it.
+		ScheduleDefinition definition = NewDefinition() with { Timeout = WholeSecondsBound + TimeSpan.FromSeconds( 1 ) };
 
 		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
 				() => _scheduler.RegisterAsync( definition ) );
 
 		Assert.Equal( "definition", exception.ParamName );
 
-		// The bound itself is accepted.
-		await _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimerBounds.Maximum } );
+		// The largest whole-second timeout within the bound is accepted.
+		await _scheduler.RegisterAsync( NewDefinition() with { Timeout = WholeSecondsBound } );
 	}
 
 	[Fact]
@@ -369,8 +373,135 @@ public abstract class SchedulerTests<TScheduleDatabase>
 				() => new Scheduler(
 						new SequentialIdGenerator( "schedule" ), _scheduleDatabase.ApplicationData,
 						SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), new FakeJobTypeRegistry( "test" ),
-						new SchedulerOptions { DefaultTimeout = TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) },
+						new SchedulerOptions { DefaultTimeout = WholeSecondsBound + TimeSpan.FromSeconds( 1 ) },
 						new TimeProviderClock( TimeProvider.System ) ) );
+
+		Assert.Equal( "options", exception.ParamName );
+	}
+
+	// == Durations: whole seconds, minimums ==
+
+	private static readonly TimeSpan SubSecond = TimeSpan.FromMilliseconds( 1500 );
+
+	public static TheoryData<string> DurationFields => new() { "Interval", "Threshold", "Backoff", "Timeout" };
+
+	// A definition whose one named duration is set to the value; the rest are valid.
+	private static ScheduleDefinition WithDuration( string field, TimeSpan value ) =>
+		field switch
+		{
+			"Interval" => NewDefinition( recurrence: new Recurrence { Interval = value, TimeZone = "Etc/UTC" } ),
+			"Threshold" => NewDefinition() with
+			{
+				MisfirePolicy = new MisfirePolicy { Handling = MisfireHandlings.Skip, Threshold = value }
+			},
+			"Backoff" => NewDefinition() with { RetryPolicy = new RetryPolicy { MaximumAttempts = 2, Backoff = value } },
+			_ => NewDefinition() with { Timeout = value }
+		};
+
+	[Theory]
+	[MemberData( nameof(DurationFields) )]
+	public async Task SubSecondDurationIsRejectedAtRegistration( string field )
+	{
+		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( WithDuration( field, SubSecond ) ) );
+
+		Assert.Contains( exception.ParamName, new[] { "definition", "recurrence" } );
+		Assert.Contains( "whole number of seconds", exception.Message );
+
+		// The same value in whole seconds is accepted.
+		await _scheduler.RegisterAsync( WithDuration( field, TimeSpan.FromSeconds( 30 ) ) );
+	}
+
+	[Theory]
+	[MemberData( nameof(DurationFields) )]
+	public async Task SubSecondDurationIsRejectedAtUpdate( string field )
+	{
+		string identifier = await _scheduler.RegisterAsync( NewDefinition() );
+
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.UpdateDefinitionAsync( identifier, WithDuration( field, SubSecond ) ) );
+	}
+
+	[Fact]
+	public async Task ZeroIntervalIsRejected()
+	{
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( WithDuration( "Interval", TimeSpan.Zero ) ) );
+
+		// A sub-second positive interval is the whole-seconds rule, and one second is the least.
+		await _scheduler.RegisterAsync( WithDuration( "Interval", TimeSpan.FromSeconds( 1 ) ) );
+	}
+
+	[Fact]
+	public async Task ZeroTimeoutIsTheDefaultAndNeverStoredAsZero()
+	{
+		// Zero is how a registration omits the timeout; it is replaced by the (at least 1 s) default.
+		string identifier = await _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.Zero } );
+
+		Assert.Equal( TimeSpan.FromMinutes( 10 ), ( await _scheduler.GetScheduleAsync( identifier ) ).Definition.Timeout );
+
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.FromSeconds( -1 ) } ) );
+	}
+
+	[Fact]
+	public async Task ThresholdBelowTheMinimumIsRejectedAndTheMinimumIsAccepted()
+	{
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( WithDuration( "Threshold", TimeSpan.FromSeconds( 14 ) ) ) );
+
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( WithDuration( "Threshold", TimeSpan.Zero ) ) );
+
+		await _scheduler.RegisterAsync( WithDuration( "Threshold", TimeSpan.FromSeconds( 15 ) ) );
+	}
+
+	[Fact]
+	public async Task ACustomMinimumMisfireThresholdIsHonoured()
+	{
+		IScheduler scheduler = CreateScheduler(
+				SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ),
+				options: new SchedulerOptions
+				{
+					MinimumMisfireThreshold = TimeSpan.FromSeconds( 2 ),
+					DefaultMisfirePolicy = new MisfirePolicy
+					{
+						Handling = MisfireHandlings.FireOnce, Threshold = TimeSpan.FromSeconds( 2 )
+					}
+				} );
+
+		await scheduler.RegisterAsync( WithDuration( "Threshold", TimeSpan.FromSeconds( 2 ) ) );
+
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => scheduler.RegisterAsync( WithDuration( "Threshold", TimeSpan.FromSeconds( 1 ) ) ) );
+
+		// Larger than the default minimum is of course fine too, and the default minimum no longer applies.
+		await scheduler.RegisterAsync( WithDuration( "Threshold", TimeSpan.FromSeconds( 20 ) ) );
+	}
+
+	public static TheoryData<SchedulerOptions> InvalidOptions => new()
+	{
+		new SchedulerOptions { MinimumMisfireThreshold = SubSecond },
+		new SchedulerOptions { MinimumMisfireThreshold = TimeSpan.FromSeconds( -1 ) },
+		new SchedulerOptions
+		{
+			DefaultMisfirePolicy = new MisfirePolicy { Handling = MisfireHandlings.Skip, Threshold = TimeSpan.FromSeconds( 14 ) }
+		},
+		new SchedulerOptions
+		{
+			DefaultMisfirePolicy = new MisfirePolicy { Handling = MisfireHandlings.Skip, Threshold = SubSecond + TimeSpan.FromMinutes( 1 ) }
+		},
+		new SchedulerOptions { DefaultRetryPolicy = new RetryPolicy { MaximumAttempts = 3, Backoff = SubSecond } },
+		new SchedulerOptions { DefaultTimeout = SubSecond + TimeSpan.FromMinutes( 1 ) },
+		new SchedulerOptions { DefaultTimeout = TimeSpan.Zero }
+	};
+
+	[Theory]
+	[MemberData( nameof(InvalidOptions) )]
+	public void InvalidOptionsAreRejectedAtConstruction( SchedulerOptions options )
+	{
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				() => CreateScheduler( SecurityManagerFactory.CreateAlwaysAuthorized( OwnerUser ), options: options ) );
 
 		Assert.Equal( "options", exception.ParamName );
 	}

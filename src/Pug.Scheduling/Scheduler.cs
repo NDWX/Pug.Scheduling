@@ -39,7 +39,42 @@ namespace Pug.Scheduling
 
 			_options = options ?? throw new ArgumentNullException( nameof(options) );
 
+			// The host's own limits and defaults are validated once, here, so a default can never
+			// introduce a sub-second or too-small value into a definition.
+			DurationRules.RequireWholeSeconds(
+					_options.MinimumMisfireThreshold, nameof(SchedulerOptions.MinimumMisfireThreshold), nameof(options) );
+
+			if( _options.MinimumMisfireThreshold < TimeSpan.Zero )
+				throw new ArgumentException(
+						$"{nameof(SchedulerOptions.MinimumMisfireThreshold)} must not be negative.", nameof(options) );
+
+			if( _options.DefaultMisfirePolicy is not null )
+				ValidateThreshold(
+						_options.DefaultMisfirePolicy.Threshold, nameof(SchedulerOptions.DefaultMisfirePolicy), nameof(options) );
+
+			if( _options.DefaultRetryPolicy is not null )
+				DurationRules.RequireWholeSeconds(
+						_options.DefaultRetryPolicy.Backoff, "DefaultRetryPolicy backoff", nameof(options) );
+
+			DurationRules.RequireWholeSeconds(
+					_options.DefaultTimeout, nameof(SchedulerOptions.DefaultTimeout), nameof(options) );
+
+			if( _options.DefaultTimeout < TimeSpan.FromSeconds( 1 ) )
+				throw new ArgumentException(
+						$"{nameof(SchedulerOptions.DefaultTimeout)} must be at least 1 second.", nameof(options) );
+
 			ValidateTimeoutBound( _options.DefaultTimeout, nameof(SchedulerOptions.DefaultTimeout), nameof(options) );
+		}
+
+		// A misfire threshold: whole seconds and at least the host's minimum (which is not negative).
+		private void ValidateThreshold( TimeSpan threshold, string what, string parameter )
+		{
+			DurationRules.RequireWholeSeconds( threshold, what + " threshold", parameter );
+
+			if( threshold < _options.MinimumMisfireThreshold )
+				throw new ArgumentException(
+						$"{what} threshold must be at least {_options.MinimumMisfireThreshold} " +
+						$"({nameof(SchedulerOptions.MinimumMisfireThreshold)}).", parameter );
 		}
 
 		private static void ValidateIdentifier( string identifier )
@@ -75,8 +110,7 @@ namespace Pug.Scheduling
 					throw new ArgumentException(
 							$"Unknown misfire handling '{definition.MisfirePolicy.Handling}'.", nameof(definition) );
 
-				if( definition.MisfirePolicy.Threshold < TimeSpan.Zero )
-					throw new ArgumentException( "Misfire threshold must not be negative.", nameof(definition) );
+				ValidateThreshold( definition.MisfirePolicy.Threshold, "Misfire", nameof(definition) );
 			}
 
 			if( definition.RetryPolicy is not null )
@@ -84,9 +118,15 @@ namespace Pug.Scheduling
 				if( definition.RetryPolicy.MaximumAttempts < 1 )
 					throw new ArgumentException( "Retry policy must allow at least one attempt.", nameof(definition) );
 
+				DurationRules.RequireWholeSeconds( definition.RetryPolicy.Backoff, "Retry backoff", nameof(definition) );
+
 				if( definition.RetryPolicy.Backoff < TimeSpan.Zero )
 					throw new ArgumentException( "Retry backoff must not be negative.", nameof(definition) );
 			}
+
+			// Zero means "omitted": ApplyDefaults substitutes DefaultTimeout (itself at least 1 s), so
+			// a stored timeout is always at least 1 s. Anything else must be whole seconds.
+			DurationRules.RequireWholeSeconds( definition.Timeout, "Timeout", nameof(definition) );
 
 			if( definition.Timeout < TimeSpan.Zero )
 				throw new ArgumentException( "Timeout must not be negative.", nameof(definition) );

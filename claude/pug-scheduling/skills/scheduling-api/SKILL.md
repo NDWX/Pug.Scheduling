@@ -79,8 +79,9 @@ string id = await scheduler.RegisterAsync( new ScheduleDefinition
 | `DefaultMisfirePolicy` | `FIRE_ONCE`, threshold 5 min |
 | `DefaultRetryPolicy` | 3 attempts, backoff 1 min |
 | `DefaultTimeout` | 10 min |
+| `MinimumMisfireThreshold` | 15 s (floor for `Threshold`) |
 
-Durations (`Interval`, `Threshold`, `Backoff`, `Timeout`) are stored in **whole seconds**, and any fraction is dropped after validation (issue #33). See Pitfalls. The schedule starts enabled, unpaused, with its first occurrence computed at the scheduler's clock.
+Durations (`Interval`, `Threshold`, `Backoff`, `Timeout`) must be **whole seconds** (see Pitfalls). The schedule starts enabled, unpaused, with its first occurrence computed at the scheduler's clock.
 
 ### Recurrence
 
@@ -204,12 +205,7 @@ The same exceptions surface in-process and through `SchedulerClient`:
 - **A partial update resets policies to the defaults.** Always start from `current.Definition with { … }`.
 - **`Payload` is a string.** Serialize your object to JSON yourself. Over raw HTTP it is a JSON *string value*, not a nested object.
 - **Times are UTC.** `NotBefore`, `NotAfter` and every returned `DateTime` are UTC, and a `DateTimeKind.Local` window value is misread, not converted. Show times in the user's zone only for display.
-- **Durations are whole seconds (issue #33).** `Interval`, `Threshold`, `Backoff` and `Timeout` are truncated after validation, so a sub-second value passes and is stored as zero:
-  - A zero `Interval` divides by zero when a run completes, so the run can never complete and is re-executed in a loop. Every later read-modify-write update then fails validation until `Interval` is corrected.
-  - A zero `Timeout` times out every run at once.
-  - A zero `Threshold` under `SKIP` skips nearly every occurrence.
-
-  Use whole seconds, and an interval of at least 1 s.
+- **Durations are whole seconds.** `Interval`, `Threshold`, `Backoff` and `Timeout` with a fraction of a second are refused with `ArgumentException` (400). `Interval` and `Timeout` must be at least 1 s (a zero `Timeout` means "use the default"), `Backoff` not negative, and `Threshold` at least the host's `MinimumMisfireThreshold` (default 15 s).
 - **The payload is not secret.** Anyone with `LIST` or `GET_INFO` on the schedule reads it. Store references to secrets, never the secrets.
 - **A blank or whitespace identifier is not reliably a 400 over HTTP.** Several schedule routes answer 500 today (a defect). Validate identifiers before calling.
 - **Time zones are resolved on the scheduler host.** An identifier that works on your machine fails with 400 if the host's time-zone data lacks it (for example, a container image without tzdata).

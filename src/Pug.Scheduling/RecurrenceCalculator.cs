@@ -22,8 +22,14 @@ namespace Pug.Scheduling
 						"Recurrence must specify exactly one of CronExpression or Interval.",
 						nameof(recurrence) );
 
-			if( hasInterval && recurrence.Interval <= TimeSpan.Zero )
-				throw new ArgumentException( "Recurrence interval must be positive.", nameof(recurrence) );
+			if( hasInterval )
+			{
+				// Whole seconds and positive, hence at least 1 s.
+				DurationRules.RequireWholeSeconds( recurrence.Interval!.Value, "Recurrence interval", nameof(recurrence) );
+
+				if( recurrence.Interval <= TimeSpan.Zero )
+					throw new ArgumentException( "Recurrence interval must be positive.", nameof(recurrence) );
+			}
 
 			if( string.IsNullOrWhiteSpace( recurrence.TimeZone ) )
 				throw new ArgumentException( "Recurrence time zone is required.", nameof(recurrence) );
@@ -112,6 +118,11 @@ namespace Pug.Scheduling
 		// The smallest anchor + k*interval (k >= 0) after from, or at from when inclusive: O(1).
 		private static DateTime IntervalGridPoint( DateTime anchor, TimeSpan interval, DateTime from, bool inclusive )
 		{
+			// Rows written before interval validation existed may hold a zero (a sub-second interval
+			// truncated by the store); fail clearly instead of dividing by zero.
+			if( interval.Ticks <= 0 )
+				throw new InvalidOperationException( "The stored interval is not positive." );
+
 			long elapsed = ( from - anchor ).Ticks;
 
 			if( elapsed < 0 )

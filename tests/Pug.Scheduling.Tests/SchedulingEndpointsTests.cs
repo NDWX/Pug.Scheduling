@@ -160,6 +160,22 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
+	public async Task SubSecondIntervalIsRejectedAsBadRequest()
+	{
+		using HttpClient client = _fixture.CreateClient( Owner );
+
+		ScheduleDefinition definition = NewDefinition() with
+		{
+			Recurrence = new Recurrence { Interval = TimeSpan.FromMilliseconds( 500 ), TimeZone = "Etc/UTC" }
+		};
+
+		HttpResponseMessage response =
+			await client.PostAsync( "/schedules", SchedulingApiFixture.JsonContent( definition ) );
+
+		Assert.Equal( HttpStatusCode.BadRequest, response.StatusCode );
+	}
+
+	[Fact]
 	public async Task ListingRequiresDomain()
 	{
 		using HttpClient client = _fixture.CreateClient( Owner );
