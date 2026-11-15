@@ -143,7 +143,7 @@ All times are UTC (`DateTimeKind.Utc` from both stores). Cron is evaluated in th
 | Possible | Not possible |
 |---|---|
 | Cron (five fields, in an IANA time zone) or a fixed interval, inside an optional `NotBefore`/`NotAfter` window | A one-off schedule. Use a window holding one occurrence, or run-now |
-| Per-schedule misfire policy, retry policy and timeout (up to about 49.7 days) | Seconds in cron, or sub-second durations (durations are stored in whole seconds, truncated; issue #33) |
+| Per-schedule misfire policy, retry policy and timeout (up to about 49.7 days) | Seconds in cron, or sub-second durations (every duration must be whole seconds) |
 | Run-now, pause and resume | Passing different parameters to one run, or cancelling a running job through the API |
 | Changing the definition, including job type and payload | Changing `Domain` or `Owner` |
 | Tenant scoping by `Domain`, owner principals, per-job-type payload validation | Listing across domains |
@@ -156,7 +156,7 @@ All times are UTC (`DateTimeKind.Utc` from both stores). Cron is evaluated in th
 - **Handlers must be idempotent on `(Schedule, ScheduledFor)`.** At-least-once is the contract, and a detached handler can overlap its own retry. See `scheduling-job-handler`.
 - **A `SKIP` threshold shorter than the claim latency skips live occurrences.** Misfire is judged at claim time. When workers are saturated or polls are slow, a tight threshold turns "late" into "skipped". Keep `Threshold` well above `PollInterval` plus the longest expected queueing.
 - **A schedule never overlaps itself.** A run longer than the interval coalesces (`FIRE_ONCE`, `SKIP`) or queues (`RUN_ALL`) the slots it covers. Size `Timeout` and the interval accordingly.
-- **Durations are stored in whole seconds, truncated (issue #33).** This applies to `Interval`, `Threshold`, `Backoff` and `Timeout`, and validation runs before the truncation. A sub-second interval is stored as zero, and the next-occurrence calculation then divides by zero at completion, so the run can never complete: it loops through re-execution as above. A stored zero interval also makes every later read-modify-write update fail validation until `Interval` is corrected. A zero timeout times out every run at once. A zero `SKIP` threshold skips nearly every occurrence. Use whole seconds.
+- **Durations are whole seconds.** `Interval`, `Threshold`, `Backoff` and `Timeout` must be whole seconds, or the call fails with `ArgumentException` (400). `Interval` and `Timeout` must be at least 1 s (a zero `Timeout` means "use the default"). `Threshold` must be at least the host's `MinimumMisfireThreshold` (default 15 s), which stops a tiny threshold from skipping nearly every occurrence under `SKIP`.
 - **Alert on the worker's "failed to report completion" log.** A completion report that keeps failing re-executes the run endlessly (see Guarantees).
 - **Run-now during a run is refused, not queued.** Check `ScheduleInfo.ExecutionLease` first, or handle the 409.
 - **A paused schedule holds everything:** due occurrences, a pending run-now, a pending retry, even adoption of a crashed run. On resume, elapsed occurrences go through the misfire policy.

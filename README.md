@@ -103,12 +103,24 @@ schema scripts in group order, as above.
 Microsoft.Data.Sqlite 10.0.0 pulls in SQLitePCLRaw 2.1.11, which carries a vulnerability advisory
 (NU1903). Reference `SQLitePCLRaw.bundle_e_sqlite3` 3.0.3 or later in the host, as the tests do.
 
+**Durations and `SchedulerOptions`.** Every schedule duration (`Recurrence.Interval`,
+`MisfirePolicy.Threshold`, `RetryPolicy.Backoff`, `Timeout`) must be a whole number of seconds, or
+registration and definition updates fail with `ArgumentException` (400). The interval must be at
+least 1 s; a `Timeout` of zero means "omitted" and takes `DefaultTimeout`; a timeout is otherwise at
+least 1 s and at most `TimerBounds.Maximum`; a backoff is not negative. A `MisfirePolicy.Threshold`
+must be at least `SchedulerOptions.MinimumMisfireThreshold` (default 15 s, whole seconds, not
+negative): a threshold shorter than a claim takes to arrive would turn every claim into a misfire
+and, under `SKIP`, skip nearly every occurrence. The `Scheduler` constructor validates the options
+and throws `ArgumentException` for a sub-second or negative minimum, a `DefaultMisfirePolicy`
+threshold that is below the minimum or not whole seconds, a `DefaultRetryPolicy` backoff that is not
+whole seconds, or a `DefaultTimeout` that is not whole seconds or is under 1 s.
+
 **Status codes.** The facades' exceptions map to the endpoints' responses, and the clients map them
 back:
 
 | Response | Exception | Raised by |
 |---|---|---|
-| 400 `BadRequestResultInfo` | `ArgumentException` | invalid definition, including a `Timeout` over `TimerBounds.Maximum` (about 49.7 days) |
+| 400 `BadRequestResultInfo` | `ArgumentException` | invalid definition, including a sub-second duration or a `Timeout` over `TimerBounds.Maximum` (about 49.7 days) |
 | 403 | `NotAuthorized` | any operation without the grant |
 | 404 | `UnknownScheduleException` / `UnknownRunException` | unknown schedule or run |
 | 409 `RunInProgressResultInfo` | `RunInProgressException` | run-now while a run is active |

@@ -186,6 +186,29 @@ public class RecurrenceCalculatorTests
 	}
 
 	[Fact]
+	public void SubSecondIntervalIsRejected()
+	{
+		Assert.Throws<ArgumentException>(
+				() => RecurrenceCalculator.Validate(
+						new Recurrence { Interval = TimeSpan.FromMilliseconds( 500 ), TimeZone = "Etc/UTC" } ) );
+
+		RecurrenceCalculator.Validate( new Recurrence { Interval = TimeSpan.FromSeconds( 1 ), TimeZone = "Etc/UTC" } );
+	}
+
+	// Rows written before validation existed may hold a zero interval: a clear error, not a
+	// DivideByZeroException.
+	[Fact]
+	public void AStoredZeroIntervalFailsClearlyInsteadOfDividingByZero()
+	{
+		Recurrence zero = new() { Interval = TimeSpan.Zero, TimeZone = "Etc/UTC" };
+
+		Assert.Throws<InvalidOperationException>( () => RecurrenceCalculator.GetFirstOccurrence( zero, Utc( 2030, 1, 1 ) ) );
+
+		Assert.Throws<InvalidOperationException>(
+				() => RecurrenceCalculator.GetNextOccurrence( zero, Utc( 2030, 1, 1 ), Utc( 2030, 1, 2 ) ) );
+	}
+
+	[Fact]
 	public void InvalidRecurrenceDetailsAreRejected()
 	{
 		Assert.Throws<ArgumentException>(
