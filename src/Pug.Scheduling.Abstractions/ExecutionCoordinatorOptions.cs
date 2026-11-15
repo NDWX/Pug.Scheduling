@@ -7,8 +7,11 @@ namespace Pug.Scheduling.Abstractions
 		// Validity of each acquired execution lease. Deliberately short: the coordinator renews
 		// leases on worker heartbeats rather than sizing them to job timeouts, so crashed
 		// workers' claims lapse quickly. Workers must heartbeat comfortably within this duration.
-		// Expiry is stamped and compared with each coordinator host's own clock, so the duration
-		// must also exceed any clock skew between hosts.
+		// Expiry is stamped and compared on the database's clock by default, so coordinator hosts'
+		// clock skew does not bear on it; a host that opts into a host clock (TimeProviderClock)
+		// makes the duration sensitive to that skew again. A forward step of the database server's
+		// clock shortens every live lease by the size of the step, so the duration must still
+		// comfortably exceed the workers' HeartbeatInterval plus any such step.
 		public TimeSpan LeaseDuration { get; init; } = TimeSpan.FromMinutes( 2 );
 
 		// Number of due candidates read per claim. A claim returns the first of them it can take,

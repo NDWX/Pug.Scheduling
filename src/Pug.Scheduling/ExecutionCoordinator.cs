@@ -18,6 +18,11 @@ namespace Pug.Scheduling
 	// candidates, and whichever locks a candidate second finds it taken and moves on. The store
 	// decides nothing.
 	//
+	// Every transition reads "now" from the ISchedulingClock inside its unit, after the row lock
+	// is held: a wait for a peer's lock must not leave it stale. With the default DatabaseClock all
+	// coordinator hosts judge due-ness, misfires and lease expiry by the database's one clock, so
+	// skew between their own clocks cannot let one adopt a live run early.
+	//
 	// Authorization lives here rather than in any hosting surface, so it cannot be bypassed by
 	// binding the coordinator differently. Every call carrying a security principal requires the
 	// corresponding CoordinatorSecurityOperations grant on the claimant identity being acted as,
@@ -38,14 +43,14 @@ namespace Pug.Scheduling
 		private readonly IApplicationData<IDataSession> _applicationDataProvider;
 		private readonly ISecurityManager _securityManager;
 		private readonly ExecutionCoordinatorOptions _options;
-		private readonly TimeProvider _timeProvider;
+		private readonly ISchedulingClock _clock;
 		private readonly ILogger<ExecutionCoordinator> _logger;
 
 		public ExecutionCoordinator( IdentifierGenerator identifierGenerator,
 									IApplicationData<IDataSession> applicationDataProvider,
 									ISecurityManager securityManager,
 									ExecutionCoordinatorOptions options,
-									TimeProvider timeProvider,
+									ISchedulingClock clock,
 									ILogger<ExecutionCoordinator> logger )
 		{
 			_identifierGenerator = identifierGenerator ??
@@ -61,12 +66,10 @@ namespace Pug.Scheduling
 			if( _options.ClaimCandidates < 1 )
 				throw new ArgumentException( "At least one claim candidate is required.", nameof(options) );
 
-			_timeProvider = timeProvider ?? throw new ArgumentNullException( nameof(timeProvider) );
+			_clock = clock ?? throw new ArgumentNullException( nameof(clock) );
 
 			_logger = logger ?? throw new ArgumentNullException( nameof(logger) );
 		}
-
-		private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
 		// claimant is the worker group's identity, qualifying its grants; the lease holder is the
 		// individual worker within it, composed as "claimant/worker". The separator is reserved
@@ -158,15 +161,18 @@ namespace Pug.Scheduling
 
 			// A small window rather than the single oldest due schedule: losing the race for one
 			// candidate to a peer, or failing to claim it, moves on to the next instead of
-			// returning nothing while other work is due.
+			// returning nothing while other work is due. The window is read at the clock's "now"
+			// in its own read unit; each candidate is then judged again at a fresh "now" once locked.
 			IEnumerable<string> candidates =
 				await _applicationDataProvider.ReadAsync(
-							( session, context ) =>
-								session.GetDueCandidatesAsync(
-										context.now, context.holder, context.jobType, context.maximumSchedules ),
+							async ( session, context ) =>
+								await session.GetDueCandidatesAsync(
+												await context.clock.GetUtcNowAsync( session ).ConfigureAwait( false ),
+												context.holder, context.jobType, context.maximumSchedules )
+											.ConfigureAwait( false ),
 							context: new
 							{
-								now = UtcNow, holder = caller.Holder, jobType,
+								clock = _clock, holder = caller.Holder, jobType,
 								maximumSchedules = _options.ClaimCandidates
 							}
 						).ConfigureAwait( false );
@@ -228,7 +234,8 @@ namespace Pug.Scheduling
 			if( schedule is null )
 				return null;
 
-			DateTime now = UtcNow;
+			// After the lock: the decision is made on the row as locked, at the time it was locked.
+			DateTime now = await _clock.GetUtcNowAsync( session ).ConfigureAwait( false );
 			OccurrenceAction action = OccurrenceState.Classify( schedule, now, caller.Holder );
 
 			switch( action )
@@ -384,11 +391,11 @@ namespace Pug.Scheduling
 			return await InUnitAsync( session => RenewAsync( session, run, caller ) ).ConfigureAwait( false );
 		}
 
-		// Extends the lease while the schedule still names this run and this holder. Expiry is not
-		// checked: a lapsed lease nobody adopted is still the holder's own (as a restarted holder
-		// re-takes its own live one). False tells the worker to abandon the run.
+		// Extends the lease to LeaseDuration from now while the schedule still names this run and
+		// this holder. Expiry is not checked: a lapsed lease nobody adopted is still the holder's own
+		// (as a restarted holder re-takes its own live one). False tells the worker to abandon the run.
 		private Task<bool> RenewAsync( IDataSession session, string run, Caller caller ) =>
-			SetHeldLeaseExpiryAsync( session, run, caller, "renewal", UtcNow + _options.LeaseDuration );
+			SetHeldLeaseExpiryAsync( session, run, caller, "renewal", _options.LeaseDuration );
 
 		// == Abandon ==
 
@@ -414,14 +421,14 @@ namespace Pug.Scheduling
 		// worker classifies the run as an adoption (D9), and the holder's own late completion is
 		// still accepted until then (a lapsed claim nobody adopted is the holder's own).
 		private Task<bool> AbandonAsync( IDataSession session, string run, Caller caller ) =>
-			SetHeldLeaseExpiryAsync( session, run, caller, "abandonment", UtcNow );
+			SetHeldLeaseExpiryAsync( session, run, caller, "abandonment", TimeSpan.Zero );
 
 		// Locks the schedule whose active run is run and, only if the caller holds it, rewrites
-		// the lease with the given expiry. Expiry is not checked: a lapsed lease nobody adopted is
-		// still the holder's own (as a restarted holder re-takes its own live one). False means
-		// the claim is not held.
+		// the lease to expire the given span after now, read once the lock is held. Expiry is not
+		// checked: a lapsed lease nobody adopted is still the holder's own (as a restarted holder
+		// re-takes its own live one). False means the claim is not held.
 		private async Task<bool> SetHeldLeaseExpiryAsync( IDataSession session, string run, Caller caller,
-														string action, DateTime expiry )
+														string action, TimeSpan expiresIn )
 		{
 			ScheduleInfo schedule = await session.GetScheduleByActiveRunAsync( run, lockRow: true ).ConfigureAwait( false );
 
@@ -438,7 +445,10 @@ namespace Pug.Scheduling
 				return false;
 			}
 
-			await session.SetExecutionAsync( schedule.Identifier, lease with { Expiry = expiry } ).ConfigureAwait( false );
+			DateTime now = await _clock.GetUtcNowAsync( session ).ConfigureAwait( false );
+
+			await session.SetExecutionAsync( schedule.Identifier, lease with { Expiry = now + expiresIn } )
+						.ConfigureAwait( false );
 
 			return true;
 		}
@@ -480,8 +490,18 @@ namespace Pug.Scheduling
 			(ScheduleInfo locked, ScheduleRun record) =
 				await ResolveCompletionAsync( session, run, caller ).ConfigureAwait( false );
 
+			// Read once the schedule is locked (by the resolution above): it stamps the run's finish
+			// and anchors its next occurrence or retry.
+			DateTime now = await _clock.GetUtcNowAsync( session ).ConfigureAwait( false );
+
+			if( locked.ExecutionLease.Expiry <= now )
+				_logger.LogWarning(
+						"Claimant {Claimant} worker {Worker} reported completion of run {Run} of schedule {Schedule} " +
+						"after its claim had lapsed; accepted because no peer adopted the run.",
+						caller.Claimant, caller.Worker, run, locked.Identifier );
+
 			OccurrenceProgress next =
-				await RecordCompletionAsync( session, locked, record, result, outcome ).ConfigureAwait( false );
+				await RecordCompletionAsync( session, locked, record, result, outcome, now ).ConfigureAwait( false );
 
 			return ( locked.Identifier, record, next );
 		}
@@ -514,21 +534,15 @@ namespace Pug.Scheduling
 				throw new ClaimNotHeldException( run );
 			}
 
-			if( lease.Expiry <= UtcNow )
-				_logger.LogWarning(
-						"Claimant {Claimant} worker {Worker} reported completion of run {Run} of schedule {Schedule} " +
-						"after its claim had lapsed; accepted because no peer adopted the run.",
-						caller.Claimant, caller.Worker, run, schedule.Identifier );
-
 			return ( schedule, record );
 		}
 
 		// Finishes the run, releases the schedule's lease, and progresses its occurrence, all in
 		// the completing unit.
 		private async Task<OccurrenceProgress> RecordCompletionAsync( IDataSession session, ScheduleInfo schedule,
-																	ScheduleRun run, string result, JobOutcome outcome )
+																	ScheduleRun run, string result, JobOutcome outcome,
+																	DateTime now )
 		{
-			DateTime now = UtcNow;
 			OccurrenceProgress progress = CompletionRules.Next( schedule, run, result, now );
 
 			await session.FinishRunAsync( run.Identifier, now, result, outcome ).ConfigureAwait( false );

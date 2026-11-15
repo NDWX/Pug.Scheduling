@@ -10,29 +10,30 @@ namespace Pug.Scheduling
 	{
 		protected IApplicationData<IDataSession> ApplicationDataProvider { get; }
 		protected ISecurityManager SecurityManager { get; }
-		protected TimeProvider TimeProvider { get; }
+
+		// Read inside each unit of work that needs the time, through its session (ISchedulingClock).
+		protected ISchedulingClock Clock { get; }
 
 		protected SchedulerBase( IApplicationData<IDataSession> applicationData,
 								ISecurityManager securityManager,
-								TimeProvider timeProvider )
+								ISchedulingClock clock )
 		{
 			ApplicationDataProvider = applicationData ??
 									throw new ArgumentNullException( nameof(applicationData) );
 
 			SecurityManager = securityManager ?? throw new ArgumentNullException( nameof(securityManager) );
 
-			TimeProvider = timeProvider ?? throw new ArgumentNullException( nameof(timeProvider) );
+			Clock = clock ?? throw new ArgumentNullException( nameof(clock) );
 		}
-
-		protected DateTime UtcNow => TimeProvider.GetUtcNow().UtcDateTime;
 
 		protected string CurrentUserIdentifier => SecurityManager.CurrentPrincipal.Identity.Identifier;
 
-		protected ActionContext<Reference> CreateActionContext() =>
+		// The current principal acting at timestamp, the clock's time in the unit that records it.
+		protected ActionContext<Reference> CreateActionContext( DateTime timestamp ) =>
 			new()
 			{
 				Actor = new Reference { Type = "USER", Identifier = CurrentUserIdentifier },
-				Timestamp = UtcNow
+				Timestamp = timestamp
 			};
 
 		protected async Task CheckAuthorizationAsync( string operation, NounQualifier domainObject,

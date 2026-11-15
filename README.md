@@ -43,8 +43,9 @@ Exclusivity comes from the execution state on the schedule's own row (active run
 expiry): every claim, renewal and completion is one transaction that locks the row, decides, and
 writes. Leases are short (2 minutes by default) and heartbeat-renewed, so a crashed worker's
 occurrence is adopted again once its lease lapses: execution is **at-least-once**, and handlers
-should key side effects on `(Schedule, ScheduledFor)`. Lease expiry is judged by each scheduler
-host's clock, so `LeaseDuration` must exceed the clock skew between hosts. A handler must honour
+should key side effects on `(Schedule, ScheduledFor)`. Due-ness, misfires and lease expiry are
+judged by the database's clock, read inside each transition after its row lock, so clock skew
+between scheduler hosts does not matter. A handler must honour
 its cancellation token: one that does not is detached after `CancellationGrace` and may still be
 running when its occurrence is retried. On a graceful shutdown a worker whose handler has stopped
 releases its claim (`AbandonClaimAsync`, grant `ABANDON_CLAIM`, bounded by `WorkerOptions.AbandonTimeout`,
@@ -80,6 +81,16 @@ services.AddSchedulingWorkers( new WorkerOptions { Workers = 4 } );   // omit wh
 The store exposes `GetSchemaUpgradeScripts()`; run them in the order given (schema version, then
 sequence) with DbUp or your migration tool of choice before first use. DbUp sorts by script name, so
 give each script group its own `RunGroupOrder` to keep that order.
+
+**Clock.** `AddScheduling` registers `DatabaseClock` as `ISchedulingClock`: every time the facades
+decide on or record (due-ness, lease expiry, run and audit timestamps) is the database's
+(`clock_timestamp()` on Postgres; on SQLite, the host's own clock, so a SQLite store is single-host).
+Register another `ISchedulingClock`, such as `new TimeProviderClock( timeProvider )`, for tests or
+a single host. Several hosts on their own clocks judge each other's leases by them, so
+`LeaseDuration` must then exceed their clock skew. A registered `TimeProvider` alone does not change
+the facades' clock. On any clock, a forward step (for example an NTP correction on the database
+server) shortens every live lease by the size of the step, so `LeaseDuration` must comfortably exceed
+`HeartbeatInterval` plus any such step.
 
 **SQLite host requirements.** Enable WAL journal mode (`PRAGMA journal_mode = WAL`) and a busy
 timeout: units of work run as real transactions (a write begins `IMMEDIATE`), and under WAL readers

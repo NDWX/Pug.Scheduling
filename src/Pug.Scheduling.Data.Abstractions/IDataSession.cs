@@ -18,6 +18,15 @@ namespace Pug.Scheduling.Data.Abstractions
 	// only by the execution coordinator's transitions.
 	public interface IDataSession : IApplicationDataSession
 	{
+		// == Clock ==
+
+		// The database's current time, UTC, read anew on every call: the actual time, not the start
+		// of the unit's transaction, so a unit that waited on a row lock reads the time after the
+		// wait. It is the one clock every coordinator host sharing the store agrees on. SQLite runs
+		// in its host's process, so its clock is that host's clock: a SQLite store is single-host in
+		// practice.
+		Task<DateTime> GetCurrentTimeAsync();
+
 		// == Schedules ==
 
 		Task InsertAsync( ScheduleInfo schedule );

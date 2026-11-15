@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pug.Application.Security;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
+using Pug.Scheduling.DependencyInjection;
 using Pug.Scheduling.Models;
 using Pug.Scheduling.Tests.Infrastructure;
 
@@ -13,8 +15,9 @@ namespace Pug.Scheduling.Tests;
 // management writes that race it, exercised against a real schedule store of each provider by the
 // subclasses below (which declare the class fixture).
 //
-// Time is the test's own clock, shared by every coordinator and scheduler a test creates: a claim
-// lapses when the clock passes its lease, exactly as it would in production.
+// Time is the test's own clock (a TimeProviderClock), shared by every coordinator and scheduler a
+// test creates: a claim lapses when the clock passes its lease, exactly as it would in production.
+// The database clock, production's default, has tests of its own (Database clock, below).
 public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	where TScheduleDatabase : class, IScheduleDatabaseFixture
 {
@@ -52,7 +55,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 				SecurityManagerFactory.CreateAlwaysAuthorized( Owner ),
 				new FakeJobTypeRegistry( _jobType ),
 				new SchedulerOptions(),
-				_clock );
+				new TimeProviderClock( _clock ) );
 	}
 
 	private DateTime Now => _clock.GetUtcNow().UtcDateTime;
@@ -65,7 +68,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 				_scheduleDatabase.ApplicationData,
 				securityManager,
 				options ?? new ExecutionCoordinatorOptions(),
-				timeProvider ?? _clock,
+				new TimeProviderClock( timeProvider ?? _clock ),
 				NullLogger<ExecutionCoordinator>.Instance );
 
 	private static ScheduleDefinition NewDefinition( string jobType, string misfireHandling = MisfireHandlings.FireOnce,
@@ -193,6 +196,49 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( tomorrow.GetUtcNow().UtcDateTime + LeaseDuration, job.ClaimExpiry );
 		Assert.Equal( tomorrow.GetUtcNow().UtcDateTime, Assert.Single( await GetRunsAsync( schedule ) ).Started,
 					TimeSpan.FromMilliseconds( 1 ) );
+	}
+
+	// == Database clock ==
+
+	// A coordinator wired by AddScheduling judges time by the database, not by its host. The host
+	// here registers a TimeProvider six hours ahead, as a host with a skewed clock would. What proves
+	// the database clock is used: a schedule due by that host clock but not by the database's is not
+	// claimed, and the claim's expiry and the run's start fall within database-clock reads taken
+	// around the claim. That a skewed peer cannot adopt a live lease early is structural (the facades
+	// hold no TimeProvider), not shown here: one host clock that both stamps and compares a lease
+	// would not adopt it early either.
+	[Fact]
+	public async Task ClaimFollowsTheDatabaseClockNotASkewedHostClock()
+	{
+		ManualTimeProvider skewedHostClock = new( DateTime.UtcNow.AddHours( 6 ) );
+
+		ServiceCollection services = new();
+		services.AddLogging();
+		services.AddSingleton( _scheduleDatabase.ApplicationData );
+		services.AddSingleton( SecurityManagerFactory.CreateAlwaysAuthorized( Claimant ) );
+		services.AddSingleton<TimeProvider>( skewedHostClock );
+		services.AddScheduling( new SequentialIdGenerator( "run-database-clock" ) );
+
+		await using ServiceProvider provider = services.BuildServiceProvider();
+
+		IExecutionCoordinator coordinator = provider.GetRequiredService<IExecutionCoordinator>();
+
+		DateTime databaseNow = await _scheduleDatabase.ReadDatabaseClockAsync();
+
+		string due = await InsertScheduleAsync( databaseNow.AddSeconds( -1 ) );
+		string dueOnlyByTheHostClock = await InsertScheduleAsync( databaseNow.AddHours( 1 ) );
+
+		DateTime before = await _scheduleDatabase.ReadDatabaseClockAsync();
+		ClaimedJob? job = await coordinator.ClaimDueJobAsync( Claimant, 1, _jobType );
+		DateTime after = await _scheduleDatabase.ReadDatabaseClockAsync();
+
+		Assert.Equal( due, job?.Context.Schedule );
+		Assert.InRange( job!.ClaimExpiry, before + LeaseDuration, after + LeaseDuration );
+		Assert.InRange( Assert.Single( await GetRunsAsync( due ) ).Started, before, after );
+
+		// Another worker finds nothing: the schedule due only by the host clock is not due.
+		Assert.Null( await coordinator.ClaimDueJobAsync( Claimant, 2, _jobType ) );
+		Assert.Empty( await GetRunsAsync( dueOnlyByTheHostClock ) );
 	}
 
 	[Fact]

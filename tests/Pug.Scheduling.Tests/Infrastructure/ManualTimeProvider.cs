@@ -2,7 +2,8 @@ namespace Pug.Scheduling.Tests.Infrastructure;
 
 /// <summary>
 /// A clock that stands still until advanced, for asserting that a facade takes its time from the
-/// injected <see cref="TimeProvider"/> rather than the system clock.
+/// injected clock (a <see cref="TimeProviderClock"/> over this) rather than the system's or the
+/// database's.
 /// </summary>
 public sealed class ManualTimeProvider : TimeProvider
 {

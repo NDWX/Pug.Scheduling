@@ -570,9 +570,30 @@ row and a separate lease. And no deciding read shared a transaction with its wri
 - **Failing candidates are isolated:** a candidate that fails is logged at Error and the claim moves
   on (#7), but when every candidate failed (none claimed, none handled as "no longer qualifies"),
   the claim rethrows the last failure rather than reporting an idle window.
-- **Clocks:** `ExecutionCoordinator` and `Scheduler` take a `TimeProvider`; lease expiry is judged on
-  each coordinator host's clock, so `LeaseDuration` must exceed the skew between hosts (a
-  database-clock expiry is a follow-up, #12).
+- **Clocks (amended in #12):** `ExecutionCoordinator` and `Scheduler` take an `ISchedulingClock`
+  (`Pug.Scheduling`), not a `TimeProvider`. Every coordination decision and every time they write —
+  due-ness (the candidate read included), misfire classification, lease expiry on claim, adoption,
+  renewal and abandonment, the completion lapse check, retry and next-occurrence times, run
+  `Started`/`Finished`, registration `NextRun` and the audit `ActionContext` stamps — reads "now"
+  through `GetUtcNowAsync( session )` inside its unit, after the row lock where there is one, so a
+  lock wait never leaves it stale. Run-now, pause and delete decide nothing by time.
+  - **`DatabaseClock` is the default** (`AddScheduling` registers it with `TryAdd`): it calls the
+    storage primitive `IDataSession.GetCurrentTimeAsync`, which decides nothing — Postgres
+    `clock_timestamp()` (the actual time; `now()` is the transaction's start, which a unit that
+    waited on a lock has passed), SQLite `strftime( '%Y-%m-%d %H:%M:%f', 'now' )` (milliseconds,
+    stamped UTC per D18). All coordinator hosts then judge leases by one clock, so host clock skew
+    can no longer let a host whose clock runs ahead adopt a live run. SQLite's clock is its host's
+    own: a SQLite store is single-host in practice. A due-candidate read served by a standby uses
+    the standby's clock and its replication lag; that is safe only because every candidate is
+    re-judged on the primary, at the primary's time, under its row lock. A forward step of the
+    database clock shortens every live lease by the step, so `LeaseDuration` must comfortably exceed
+    `HeartbeatInterval` plus any such step.
+  - **`TimeProviderClock( TimeProvider )`** is for tests (with `ManualTimeProvider`) and single-host
+    deployments. A host registers it as `ISchedulingClock`; a registered `TimeProvider` alone does
+    not change the facades' clock. Several hosts on their own clocks are skew-sensitive again:
+    `LeaseDuration` must then exceed their skew.
+  - The worker keeps its `TimeProvider`: it measures only local durations and stamps
+    `WorkerInfo.LastPoll`, which is informational.
 - Run-now refusal, manual-run rules and the occurrence rules: D10, D11, D12.
 
 ## D24 — SQLite self-enlistment, UnitsOfWork, row locks, shared session base (#10; partly supersedes D22)
@@ -595,8 +616,8 @@ Microsoft.Data.Sqlite ignores `TransactionScope`, so on SQLite every statement a
   instead of failing with `40001` under Serializable (D21, D22).
 - **Shared `DapperDataSessionBase`** (new `Pug.Scheduling.Data.Dapper`): the SQL, row types,
   `Compose` and the JSON handler are written once. Providers override only the dialect:
-  enabled/paused predicate, run-requested predicate, locking clause, and SQLite's D18 UTC stamping
-  (`ReadTimestamp`). This replaces the hand-mirrored Postgres session. The due-candidate read is a
+  enabled/paused predicate, run-requested predicate, locking clause, current-time expression (#12,
+  D23), and SQLite's D18 UTC stamping (`ReadTimestamp`). This replaces the hand-mirrored Postgres session. The due-candidate read is a
   `union` of three bounded branches, one per partial index, because an `or` is a full scan on
   SQLite.
 - **Host requirements on SQLite:** WAL journal mode is what makes "reads block nobody" true (a
@@ -714,7 +735,7 @@ Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
   **C** interval grid and per-policy baselines; **D** worker detach, `TimerBounds`; **E** documentation
   reconciliation — **DONE (310 tests)**, awaiting the user's single review (no pause between
   sub-phases, by user decision, for this work only). Closes #7, #8, #9. Follow-ups: **#11**
-  (`AbandonClaimAsync`: graceful shutdown releases the lease; **DONE**, D27), **#12** (database-clock lease expiry),
+  (`AbandonClaimAsync`: graceful shutdown releases the lease; **DONE**, D27), **#12** (database-clock lease expiry: `ISchedulingClock`, `DatabaseClock` by default; **DONE**, D23),
   **#13** (shared SQLite enlistment package), **#14** (`for update skip locked` on Postgres claims).
 - **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
   handler) still deferred.

@@ -16,8 +16,14 @@ namespace Pug.Scheduling.DependencyInjection
 		/// already registered <see cref="IApplicationData{IDataSession}"/> for the schedule store
 		/// (a concrete provider such as the Postgres or SQLite <c>DapperData</c>; execution leases
 		/// live on its schedule rows), <see cref="ISecurityManager"/>, and logging
-		/// (<see cref="ILogger{TCategoryName}"/>, e.g. via <c>AddLogging()</c>). A registered
-		/// <see cref="TimeProvider"/> is used as the facades' clock; otherwise <see cref="TimeProvider.System"/>.
+		/// (<see cref="ILogger{TCategoryName}"/>, e.g. via <c>AddLogging()</c>).
+		/// <para>
+		/// The facades read the time from <see cref="ISchedulingClock"/>, registered here as
+		/// <see cref="DatabaseClock"/> unless the host registers its own, before or after this call:
+		/// for example a <see cref="TimeProviderClock"/> for tests or a single-host deployment. A
+		/// registered <see cref="TimeProvider"/> alone does not change the facades' clock: several
+		/// coordinator hosts judging leases by their own clocks would let clock skew adopt live runs.
+		/// </para>
 		/// </summary>
 		public static IServiceCollection AddScheduling( this IServiceCollection serviceCollection,
 														IdentifierGenerator identifierGenerator,
@@ -27,6 +33,10 @@ namespace Pug.Scheduling.DependencyInjection
 			if( identifierGenerator == null ) throw new ArgumentNullException( nameof(identifierGenerator) );
 
 			JobTypeRegistrations registrations = GetOrAddRegistrations( serviceCollection );
+
+			// TryAdd, so a clock the host registered first is kept; one registered later is the one
+			// resolved, as the last registration of a service is.
+			serviceCollection.TryAddSingleton<ISchedulingClock, DatabaseClock>();
 
 			serviceCollection.TryAddSingleton<IJobTypeRegistry>(
 					provider => new JobTypeRegistry( registrations, provider )
@@ -39,7 +49,7 @@ namespace Pug.Scheduling.DependencyInjection
 							provider.GetRequiredService<ISecurityManager>(),
 							provider.GetRequiredService<IJobTypeRegistry>(),
 							options ?? new SchedulerOptions(),
-							GetTimeProvider( provider )
+							provider.GetRequiredService<ISchedulingClock>()
 						)
 				);
 
@@ -49,17 +59,13 @@ namespace Pug.Scheduling.DependencyInjection
 							provider.GetRequiredService<IApplicationData<IDataSession>>(),
 							provider.GetRequiredService<ISecurityManager>(),
 							coordinatorOptions ?? new ExecutionCoordinatorOptions(),
-							GetTimeProvider( provider ),
+							provider.GetRequiredService<ISchedulingClock>(),
 							provider.GetRequiredService<ILogger<ExecutionCoordinator>>()
 						)
 				);
 
 			return serviceCollection;
 		}
-
-		// The host's clock when it registered one (e.g. a fake in tests), else the system clock.
-		private static TimeProvider GetTimeProvider( IServiceProvider provider ) =>
-			provider.GetService<TimeProvider>() ?? TimeProvider.System;
 
 		/// <summary>
 		/// Registers a payload validator for the job type and declares the job type schedulable.

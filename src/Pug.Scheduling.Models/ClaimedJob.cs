@@ -34,8 +34,9 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// UTC time at which the claim lapses unless renewed; the worker should heartbeat
-		// comfortably before this.
+		// UTC time at which the claim lapses unless renewed. It is on the coordinator's clock (the
+		// database's by default), not the worker's, so it is informational: a worker paces renewals
+		// by its own intervals.
 		[Required, DataMember( IsRequired = true )]
 		public DateTime ClaimExpiry
 		{

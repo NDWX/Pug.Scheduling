@@ -1,3 +1,4 @@
+using Dapper;
 using Npgsql;
 using Pug.Application.Data;
 using Pug.Scheduling.Data.Abstractions;
@@ -24,6 +25,14 @@ public sealed class PostgresScheduleDatabaseFixture : IScheduleDatabaseFixture, 
 		PostgresTestServer.UpgradeDatabase( _connectionString, data.GetSchemaUpgradeScripts() );
 
 		ApplicationData = data;
+	}
+
+	// now(), the autocommitted statement's start, rather than the store's clock_timestamp().
+	public async Task<DateTime> SelectCurrentTimeAsync()
+	{
+		await using NpgsqlConnection connection = new( _connectionString );
+
+		return await connection.ExecuteScalarAsync<DateTime>( "select now();" );
 	}
 
 	public async Task DisposeAsync()
