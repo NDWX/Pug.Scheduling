@@ -286,7 +286,7 @@ public static class SchedulingEndpoints
 		try
 		{
 			// Owner defaults to the calling principal when unspecified; registering on behalf of
-			// another principal requires the CREATE grant.
+			// another principal requires the CREATE_ON_BEHALF grant.
 			string identifier = await scheduler.RegisterAsync( definition, owner ).ConfigureAwait( false );
 
 			return Results.Created( string.Empty, identifier );

@@ -71,7 +71,7 @@ public class SchedulerClientTests : IClassFixture<SchedulingApiFixture>
 	public async Task RegistrationForAnotherOwnerCarriesTheOwnerAcross()
 	{
 		_fixture.Authorizations.Grant(
-				Owner, SecurityOperations.Create, SecurityObjectTypes.Schedule, SchedulingApiFixture.Domain );
+				Owner, SecurityOperations.CreateOnBehalf, "USER", SchedulingApiFixture.Domain, "delegated-owner" );
 
 		// Reading back a schedule owned by someone else is not covered by the owner rule either.
 		_fixture.Authorizations.Grant(

@@ -50,7 +50,9 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
   query is the one SQL that mirrors a rule, as a documented pre-filter of `OccurrenceState.Classify`.
 - `Owner` is not part of `ScheduleDefinition`; assigned at registration (defaults to current
   principal), immutable. Owner rule: `Type == "USER" && Identifier == current` — covers creating
-  own schedules (no ACL) and view/modify/delete of owned schedules. Domain is immutable.
+  own schedules (no ACL) and view/modify/delete of owned schedules. Registering on behalf of
+  another owner checks `CREATE_ON_BEHALF` against the owner principal (`Type`/`Identifier` =
+  owner's, `Domain` = definition's); there is no `CREATE` operation. Domain is immutable.
 - Idempotency key is `(Schedule, ScheduledFor)`: retries keep the original occurrence; orphaned
   unfinished runs are adopted on re-claim (adoption precedes every other rule, misfire SKIP
   included), never duplicated. A retry carries its occurrence on the row (`occurrence`).
