@@ -17,6 +17,11 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
 	internal const string SchemeName = "Test";
 	internal const string UserHeader = "X-Test-User";
 
+	// Optional claim for policy tests: a caller carrying it satisfies a policy that requires
+	// ScopeClaim, while the principal's name (and so its grants) is unaffected.
+	internal const string ScopeHeader = "X-Test-Scope";
+	internal const string ScopeClaim = "scope";
+
 	public TestAuthenticationHandler( IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger,
 									UrlEncoder encoder )
 		: base( options, logger, encoder )
@@ -29,7 +34,13 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
 			string.IsNullOrEmpty( user ) )
 			return Task.FromResult( AuthenticateResult.NoResult() );
 
-		ClaimsIdentity identity = new( new[] { new Claim( ClaimTypes.Name, user.ToString() ) }, SchemeName );
+		List<Claim> claims = new() { new Claim( ClaimTypes.Name, user.ToString() ) };
+
+		if( Request.Headers.TryGetValue( ScopeHeader, out Microsoft.Extensions.Primitives.StringValues scope ) &&
+			!string.IsNullOrEmpty( scope ) )
+			claims.Add( new Claim( ScopeClaim, scope.ToString() ) );
+
+		ClaimsIdentity identity = new( claims, SchemeName );
 
 		return Task.FromResult(
 				AuthenticateResult.Success( new AuthenticationTicket( new ClaimsPrincipal( identity ), SchemeName ) )

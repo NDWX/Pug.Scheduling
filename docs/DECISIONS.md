@@ -250,7 +250,8 @@ makes the call. This leaves one extension point instead of two.
 
 Three separately mapped surfaces, each carrying **its own route prefix** rather than relying on
 the host to supply one: a host's routes cannot be assumed to be the scheduler's alone, and the
-scheduler host serves more than one scheduling surface at once (user directive).
+scheduler host serves more than one scheduling surface at once (user directive). **Amended (D28):** the
+segment is the default of a host-configurable base path, and each surface takes authorization policies.
 
 | Extension | Package | Routes |
 |---|---|---|
@@ -716,6 +717,30 @@ held until the lease lapsed (up to `LeaseDuration`) before a peer could adopt th
   positive, within `TimerBounds.Maximum`), logged at Warning on failure, and never throws out of the
   pump. It adds at most that bound to a stopping worker, so keep `CancellationGrace + AbandonTimeout`
   below the host's shutdown timeout.
+
+## D28 — Host-configurable base path and authorization policies per API (#28, #29; amends D15)
+
+D15's first route segments (`schedules`, `executionCoordinator`, `workers`) are now defaults, and a
+host may also gate each API with its own authorization policies.
+
+- **One options class per API**, in its WebApi package: `SchedulingEndpointOptions`,
+  `ExecutionCoordinatorEndpointOptions` (`Pug.Scheduling.WebApi`) and `SchedulerWorkerEndpointOptions`
+  (`Pug.Scheduling.Worker.WebApi`), each with `BasePath` and `AuthorizationPolicies`. Passed to the
+  `Map…Endpoints( options? )` call; omitted, today's behaviour. Invalid values throw
+  `ArgumentException` when the API is mapped.
+- **Defaults live once** in `Pug.Scheduling.WebApi.Models` (`ApiBasePaths`), with the one
+  normalization (`Normalize`: trim `/`, non-empty) that server options and clients share, so a client
+  and a server given the same base path agree.
+- **Each Map method makes a `RouteGroupBuilder`** on the base path, applies `RequireAuthorization()`
+  (or the policies) once on the group and maps endpoints relative to it; it **returns the group** so
+  the host can add conventions. The per-endpoint `RequireAuthorization()` calls are gone.
+- **The policy is a transport gate, not a grant decision.** It decides who may call the API at all;
+  the facades (`Scheduler`, `ExecutionCoordinator`) and, for worker management, the endpoint handlers
+  still enforce the ACL grants (D16, D20), so an in-process caller is held to the same rules.
+- **Clients** take an optional `basePath` (default from `ApiBasePaths`), normalized and validated alike.
+- **`Pug.Scheduling.WebApi` and `Pug.Scheduling.Worker.WebApi` drop net6.0** (net8.0;net10.0) for
+  `MapGroup`; the `NET7_0_OR_GREATER` branches are gone. `Worker.WebApi` now references
+  `WebApi.Models` (no ASP.NET dependency) for the defaults.
 
 ## Verification conventions
 

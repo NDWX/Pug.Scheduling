@@ -4,6 +4,7 @@ using Pug.HttpApiClient;
 using Pug.HttpApiClient.Json;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.Client;
 
@@ -17,15 +18,21 @@ namespace Pug.Scheduling.Client;
 /// </summary>
 public class SchedulerClient : ApiClient, IScheduler
 {
-	private const string SchedulesPath = "schedules";
+	private readonly string _schedulesPath;
 
-	public SchedulerClient( IHttpApiClient httpClient )
+	/// <param name="httpClient">Carries the caller's credentials.</param>
+	/// <param name="basePath">
+	/// Where the host mapped the schedule endpoints (<c>SchedulingEndpointOptions.BasePath</c>);
+	/// leading and trailing <c>/</c> are ignored. Throws <see cref="ArgumentException"/> when empty.
+	/// </param>
+	public SchedulerClient( IHttpApiClient httpClient, string basePath = ApiBasePaths.Schedules )
 		: base( httpClient )
 	{
+		_schedulesPath = ApiBasePaths.Normalize( basePath, nameof(basePath) );
 	}
 
-	private static string SchedulePath( string identifier ) =>
-		$"{SchedulesPath}/{Uri.EscapeDataString( identifier )}";
+	private string SchedulePath( string identifier ) =>
+		$"{_schedulesPath}/{Uri.EscapeDataString( identifier )}";
 
 	// Pug.HttpApiClient 0.6.0 aggregates the query collection without a seed, so an empty (but
 	// non-null) dictionary throws where null is handled: hand it null when there is nothing to ask.
@@ -50,7 +57,7 @@ public class SchedulerClient : ApiClient, IScheduler
 
 		return ApiFailures.TranslateAsync(
 				() => HttpClient.PostAsync<ScheduleDefinition, string>(
-						SchedulesPath, definition, queries: Queries( queries ) )
+						_schedulesPath, definition, queries: Queries( queries ) )
 			);
 	}
 
@@ -65,7 +72,7 @@ public class SchedulerClient : ApiClient, IScheduler
 			queries["jobType"] = jobType;
 
 		return ApiFailures.TranslateAsync(
-				() => HttpClient.GetAsync<IEnumerable<ScheduleInfo>>( SchedulesPath, queries: Queries( queries ) )
+				() => HttpClient.GetAsync<IEnumerable<ScheduleInfo>>( _schedulesPath, queries: Queries( queries ) )
 			);
 	}
 

@@ -5,14 +5,15 @@ using Microsoft.AspNetCore.Routing;
 using Pug.Application.Security;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Models;
+using Pug.Scheduling.WebApi.Models;
 
 namespace Pug.Scheduling.Worker.WebApi;
 
 public static class SchedulerWorkerEndpoints
 {
 	/// <summary>
-	/// Maps management endpoints for the workers hosted in this process, under their own
-	/// <c>workers/</c> prefix, onto the given route builder; individual workers are addressed by
+	/// Maps management endpoints for the workers hosted in this process, under
+	/// <see cref="SchedulerWorkerEndpointOptions.BasePath"/> (default <c>workers</c>), onto the given route builder; individual workers are addressed by
 	/// their host-wide worker number through <see cref="ISchedulerWorkerRegistry"/>. They live in
 	/// their own package because a worker may be hosted out-of-process, where the host reaches the
 	/// scheduler solely through the execution coordinator's transport and has no reason to
@@ -22,52 +23,62 @@ public static class SchedulerWorkerEndpoints
 	/// <see cref="WorkerSecurityOperations"/> grant on
 	/// <see cref="SecurityObjectTypes.SchedulerWorker"/> qualified by the worker's claimant
 	/// identity. There is no owner exemption — worker management is an operator concern.
+	/// The group requires an authenticated caller, or the policies of
+	/// <see cref="SchedulerWorkerEndpointOptions.AuthorizationPolicies"/>, in addition.
+	/// Returns the endpoints' route group so the host can add further conventions to them.
 	/// </summary>
-	public static IEndpointRouteBuilder MapSchedulerWorkerEndpoints( this IEndpointRouteBuilder routes )
+	public static RouteGroupBuilder MapSchedulerWorkerEndpoints( this IEndpointRouteBuilder routes,
+																	SchedulerWorkerEndpointOptions? options = null )
 	{
-		routes.MapGet( "workers", GetWorkers )
-			.RequireAuthorization()
+		options ??= new SchedulerWorkerEndpointOptions();
+
+		// The policies are the host's transport gate: they decide who may call this API at all.
+		// They are not the grant decisions: each handler below still checks the caller's
+		// WorkerSecurityOperations grant, because ISchedulerWorker performs none of its own.
+		RouteGroupBuilder group = routes.MapGroup( ApiBasePaths.Normalize( options.BasePath, nameof(options.BasePath) ) );
+
+		// No policies (null or empty) means the default policy: authenticated callers only.
+		IReadOnlyList<string> policies = options.AuthorizationPolicies ?? Array.Empty<string>();
+
+		if( policies.Any( string.IsNullOrWhiteSpace ) )
+			throw new ArgumentException( "Authorization policy names must not be blank.", nameof(options) );
+
+		if( policies.Count == 0 )
+			group.RequireAuthorization();
+		else
+			group.RequireAuthorization( policies.ToArray() );
+
+		group.MapGet( "", GetWorkers )
 			.WithName( "GetSchedulerWorkers" )
-#if NET7_0_OR_GREATER
 			.WithTags( "SchedulerWorker" )
 			.WithSummary( "Get runtime status of the workers hosted in this process that the caller may view" )
-#endif
 			.Produces<WorkerInfo[]>( StatusCodes.Status200OK );
 
-		routes.MapGet( "workers/{worker:int}", GetWorkerInfo )
-			.RequireAuthorization()
+		group.MapGet( "{worker:int}", GetWorkerInfo )
 			.WithName( "GetSchedulerWorkerInfo" )
-#if NET7_0_OR_GREATER
 			.WithTags( "SchedulerWorker" )
 			.WithSummary( "Get runtime status of a worker hosted in this process" )
-#endif
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "workers/{worker:int}/pause", PauseWorker )
-			.RequireAuthorization()
+		group.MapPost( "{worker:int}/pause", PauseWorker )
 			.WithName( "PauseSchedulerWorker" )
-#if NET7_0_OR_GREATER
 			.WithTags( "SchedulerWorker" )
 			.WithSummary( "Stop the worker claiming further jobs" )
-#endif
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "workers/{worker:int}/resume", ResumeWorker )
-			.RequireAuthorization()
+		group.MapPost( "{worker:int}/resume", ResumeWorker )
 			.WithName( "ResumeSchedulerWorker" )
-#if NET7_0_OR_GREATER
 			.WithTags( "SchedulerWorker" )
 			.WithSummary( "Resume job claiming by the worker" )
-#endif
 			.Produces<WorkerInfo>( StatusCodes.Status200OK )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		return routes;
+		return group;
 	}
 
 	// Worker grants are qualified by claimant identity rather than domain: a worker serves every

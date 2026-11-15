@@ -13,12 +13,14 @@ namespace Pug.Scheduling.WebApi;
 public static class SchedulingEndpoints
 {
 	/// <summary>
-	/// Maps schedule management API endpoints, under their own <c>schedules/</c> prefix, onto the
-	/// given route builder: the host's routes are not assumed to be the scheduler's alone, and
-	/// the scheduler host serves the execution coordinator's routes alongside these. Pass
+	/// Maps schedule management API endpoints, under <see cref="SchedulingEndpointOptions.BasePath"/>
+	/// (default <c>schedules</c>), onto the given route builder: the host's routes are not assumed
+	/// to be the scheduler's alone, and the scheduler host serves the execution coordinator's
+	/// routes alongside these. Pass
 	/// <c>app</c> to mount at the application root, or a <see cref="RouteGroupBuilder"/> from
 	/// <c>app.MapGroup("/your/prefix")</c> to mount the whole surface beneath a further prefix.
-	/// All endpoints require an authenticated caller; authorization (the schedule owner rule
+	/// All endpoints require an authenticated caller, or the policies of
+	/// <see cref="SchedulingEndpointOptions.AuthorizationPolicies"/>; authorization (the schedule owner rule
 	/// followed by role-based ACLs) is enforced by <see cref="IScheduler"/> itself, so these
 	/// endpoints only translate its outcomes into HTTP results.
 	/// Endpoints for externally hosted workers are mapped separately by
@@ -27,89 +29,88 @@ public static class SchedulingEndpoints
 	/// not reference this package at all.
 	/// Swagger documentation is surfaced when the host configures <c>AddEndpointsApiExplorer()</c>
 	/// and <c>AddSwaggerGen()</c>.
+	/// Returns the endpoints' route group so the host can add further conventions to them.
 	/// </summary>
-	public static IEndpointRouteBuilder MapSchedulingEndpoints( this IEndpointRouteBuilder routes )
+	public static RouteGroupBuilder MapSchedulingEndpoints( this IEndpointRouteBuilder routes,
+																SchedulingEndpointOptions? options = null )
 	{
+		options ??= new SchedulingEndpointOptions();
+
+		// The policies are the host's transport gate: they decide who may call this API at all.
+		// They are not the grant decisions, which stay in IScheduler: it enforces them whoever the
+		// caller is, so an in-process caller is held to the same rules as one arriving here.
+		RouteGroupBuilder group = routes.MapGroup( ApiBasePaths.Normalize( options.BasePath, nameof(options.BasePath) ) );
+
+		// No policies (null or empty) means the default policy: authenticated callers only.
+		IReadOnlyList<string> policies = options.AuthorizationPolicies ?? Array.Empty<string>();
+
+		if( policies.Any( string.IsNullOrWhiteSpace ) )
+			throw new ArgumentException( "Authorization policy names must not be blank.", nameof(options) );
+
+		if( policies.Count == 0 )
+			group.RequireAuthorization();
+		else
+			group.RequireAuthorization( policies.ToArray() );
+
 		// Literal-segment routes are registered before parameterised routes of the same
 		// HTTP method to ensure the routing system resolves them correctly.
 
-		routes.MapGet( "schedules", GetSchedules )
-			.RequireAuthorization()
+		group.MapGet( "", GetSchedules )
 			.WithName( "GetSchedules" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Get schedules in a domain" )
-#endif
 			.Produces<IEnumerable<ScheduleInfo>>( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapGet( "schedules/{identifier}", GetSchedule )
-			.RequireAuthorization()
+		group.MapGet( "{identifier}", GetSchedule )
 			.WithName( "GetSchedule" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Get a schedule by identifier" )
-#endif
 			.Produces<ScheduleInfo>( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapGet( "schedules/{identifier}/runs", GetScheduleRuns )
-			.RequireAuthorization()
+		group.MapGet( "{identifier}/runs", GetScheduleRuns )
 			.WithName( "GetScheduleRuns" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Get the execution history of a schedule" )
-#endif
 			.Produces<IEnumerable<ScheduleRun>>( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "schedules", RegisterSchedule )
-			.RequireAuthorization()
+		group.MapPost( "", RegisterSchedule )
 			.WithName( "RegisterSchedule" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Register a new schedule" )
-#endif
 			.Produces<string>( StatusCodes.Status201Created )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "schedules/{identifier}/pause", PauseSchedule )
-			.RequireAuthorization()
+		group.MapPost( "{identifier}/pause", PauseSchedule )
 			.WithName( "PauseSchedule" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Suspend firing of a schedule" )
-#endif
 			.Produces( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "schedules/{identifier}/resume", ResumeSchedule )
-			.RequireAuthorization()
+		group.MapPost( "{identifier}/resume", ResumeSchedule )
 			.WithName( "ResumeSchedule" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Lift the suspension of a schedule" )
-#endif
 			.Produces( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapPost( "schedules/{identifier}/run", RunScheduleNow )
-			.RequireAuthorization()
+		group.MapPost( "{identifier}/run", RunScheduleNow )
 			.WithName( "RunScheduleNow" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Request immediate execution of a schedule" )
-#endif
 			// Accepted, not Ok: the request is only recorded — execution happens when a worker
 			// next claims the schedule. Conflict: a run of the schedule is in progress.
 			.Produces( StatusCodes.Status202Accepted )
@@ -118,31 +119,25 @@ public static class SchedulingEndpoints
 			.Produces( StatusCodes.Status404NotFound )
 			.Produces<RunInProgressResultInfo>( StatusCodes.Status409Conflict );
 
-		routes.MapPut( "schedules/{identifier}", UpdateScheduleDefinition )
-			.RequireAuthorization()
+		group.MapPut( "{identifier}", UpdateScheduleDefinition )
 			.WithName( "UpdateScheduleDefinition" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Replace the definition of a schedule" )
-#endif
 			.Produces( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		routes.MapDelete( "schedules/{identifier}", DeleteSchedule )
-			.RequireAuthorization()
+		group.MapDelete( "{identifier}", DeleteSchedule )
 			.WithName( "DeleteSchedule" )
-#if NET7_0_OR_GREATER
 			.WithTags( "Schedules" )
 			.WithSummary( "Delete a schedule and its run history" )
-#endif
 			.Produces( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound );
 
-		return routes;
+		return group;
 	}
 
 	// Owner principals are conveyed as a type/identifier pair of query parameters (Subject
