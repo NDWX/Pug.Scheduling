@@ -220,6 +220,71 @@ public abstract class SchedulerTests<TScheduleDatabase>
 		await Assert.ThrowsAsync<NotAuthorized>( () => intruder.DeleteAsync( identifier ) );
 	}
 
+	private static Reference Service( string identifier ) => new() { Type = "SERVICE", Identifier = identifier };
+
+	// A USER and a SERVICE principal share an identifier: the listing exemption and the store
+	// filter must tell them apart by type. Returns the caller (the shared-identifier user, holding
+	// only the grants given) and the two schedules.
+	private async Task<(IScheduler Caller, string UserSchedule, string ServiceSchedule)> RegisterSharedIdentifierAsync(
+		bool grantList )
+	{
+		TestAuthorizations authorizations = new();
+		authorizations.Grant( OwnerUser, SecurityOperations.CreateOnBehalf, "SERVICE", Domain, OwnerUser );
+
+		if( grantList )
+			authorizations.Grant( OwnerUser, SecurityOperations.List, SecurityObjectTypes.Schedule, Domain );
+
+		IScheduler caller = CreateGrantedScheduler( authorizations );
+
+		string userSchedule = await caller.RegisterAsync( NewDefinition( name: "User's" ) );
+		string serviceSchedule = await caller.RegisterAsync( NewDefinition( name: "Service's" ), Service( OwnerUser ) );
+
+		return ( caller, userSchedule, serviceSchedule );
+	}
+
+	[Fact]
+	public async Task ListingOwnUserSchedulesNeedsNoGrantAndExcludesAnotherTypeWithTheSameIdentifier()
+	{
+		( IScheduler caller, string userSchedule, string serviceSchedule ) =
+			await RegisterSharedIdentifierAsync( grantList: false );
+
+		IEnumerable<ScheduleInfo> listed = await caller.GetSchedulesAsync( Domain, owner: User( OwnerUser ) );
+
+		Assert.Contains( listed, schedule => schedule.Identifier == userSchedule );
+		Assert.DoesNotContain( listed, schedule => schedule.Identifier == serviceSchedule );
+	}
+
+	[Fact]
+	public async Task ListingAnotherTypeWithTheSameIdentifierNeedsTheListGrant()
+	{
+		( IScheduler caller, _, _ ) = await RegisterSharedIdentifierAsync( grantList: false );
+
+		await Assert.ThrowsAsync<NotAuthorized>( () => caller.GetSchedulesAsync( Domain, owner: Service( OwnerUser ) ) );
+	}
+
+	[Fact]
+	public async Task ListingByOwnerWithTheListGrantMatchesTypeAndIdentifier()
+	{
+		( IScheduler caller, string userSchedule, string serviceSchedule ) =
+			await RegisterSharedIdentifierAsync( grantList: true );
+
+		IEnumerable<ScheduleInfo> listed = await caller.GetSchedulesAsync( Domain, owner: Service( OwnerUser ) );
+
+		Assert.Contains( listed, schedule => schedule.Identifier == serviceSchedule );
+		Assert.DoesNotContain( listed, schedule => schedule.Identifier == userSchedule );
+	}
+
+	[Theory]
+	[InlineData( null, "id" )]
+	[InlineData( "", "id" )]
+	[InlineData( " ", "id" )]
+	[InlineData( "USER", null )]
+	[InlineData( "USER", "" )]
+	[InlineData( "USER", " " )]
+	public async Task ListingWithAnIncompleteOwnerIsRejected( string? type, string? identifier ) =>
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.GetSchedulesAsync( Domain, owner: new Reference { Type = type!, Identifier = identifier! } ) );
+
 	private IScheduler CreateGrantedScheduler( TestAuthorizations authorizations ) =>
 		CreateScheduler(
 				SecurityManagerFactory.CreateContextual(

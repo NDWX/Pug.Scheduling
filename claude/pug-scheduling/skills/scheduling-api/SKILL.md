@@ -115,7 +115,7 @@ An exhausted schedule is kept, with its history. It runs again only through run-
 | Call | Returns | Notes |
 |---|---|---|
 | `RegisterAsync( definition, owner = null )` | The new identifier | See above |
-| `GetSchedulesAsync( domain, owner = null, jobType = null )` | `Task<IEnumerable<ScheduleInfo>>`, ordered by name | Always one domain. The owner filter currently matches the owner's `Identifier` only and ignores its `Type` (tracked as issue #32) |
+| `GetSchedulesAsync( domain, owner = null, jobType = null )` | `Task<IEnumerable<ScheduleInfo>>`, ordered by name | Always one domain. The owner filter matches both the owner's `Type` and `Identifier`, and both must be non-blank (`ArgumentException` otherwise) |
 | `GetScheduleAsync( identifier )` | `ScheduleInfo` | Includes `State` and, while a run is in progress, `ExecutionLease` |
 | `UpdateDefinitionAsync( identifier, definition )` | | Replaces the whole definition; see below |
 | `DeleteAsync( identifier )` | | Removes the schedule and its run history |
@@ -177,7 +177,7 @@ catch( RunInProgressException e )
 | `SecurityOperations` | Needed for | Checked on |
 |---|---|---|
 | `CREATE_ON_BEHALF` | Registering for an owner other than yourself | `{ Domain, Type = owner.Type, Identifier = owner.Identifier }` |
-| `LIST` | `GetSchedulesAsync`, unless the owner filter's `Identifier` is yours. The exemption currently ignores the filter's `Type`, so a USER can list, without `LIST`, schedules owned by a principal of another type that shares their identifier (tracked as issue #32) | `{ Domain, Type = "SCHEDULE" }` |
+| `LIST` | `GetSchedulesAsync`, unless the owner filter is `{ Type = "USER", Identifier = <you> }` | `{ Domain, Type = "SCHEDULE" }` |
 | `GET_INFO` | `GetScheduleAsync` | `{ Domain, Type = "SCHEDULE", Identifier = schedule }` |
 | `SET_DEFINITION` | `UpdateDefinitionAsync` | the same |
 | `DELETE` | `DeleteAsync` | the same |
@@ -210,7 +210,6 @@ The same exceptions surface in-process and through `SchedulerClient`:
   - A zero `Threshold` under `SKIP` skips nearly every occurrence.
 
   Use whole seconds, and an interval of at least 1 s.
-- **Owner `Type` is ignored when listing (issue #32).** Until it is fixed, keep principal identifiers unique across owner types, and filter `GetSchedulesAsync` results on `Owner.Type` yourself.
 - **The payload is not secret.** Anyone with `LIST` or `GET_INFO` on the schedule reads it. Store references to secrets, never the secrets.
 - **A blank or whitespace identifier is not reliably a 400 over HTTP.** Several schedule routes answer 500 today (a defect). Validate identifiers before calling.
 - **Time zones are resolved on the scheduler host.** An identifier that works on your machine fails with 400 if the host's time-zone data lacks it (for example, a container image without tzdata).

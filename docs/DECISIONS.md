@@ -47,6 +47,7 @@ not in the definition). Owner rule (`SchedulerBase.IsCurrentUser`): matches only
 check). The rule covers **creating one's own schedules** (no ACL grant needed) and view/modify/
 delete of owned schedules; registering on behalf of another principal requires the CREATE_ON_BEHALF grant (D26);
 all other access falls through to Pug.Authorized ACLs with domain-qualified `NounQualifier`.
+Amended (#32): the `LIST` exemption follows the same owner rule (the owner filter is `{ USER, caller }`), and the owner filter matches type and identifier.
 Security constants (`SecurityObjectTypes`, `SecurityOperations`) live in **Abstractions** — user
 overrode the Corea precedent (core project): consumer-usable constants belong with abstractions.
 
