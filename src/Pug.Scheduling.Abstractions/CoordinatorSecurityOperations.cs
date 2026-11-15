@@ -4,8 +4,8 @@ namespace Pug.Scheduling.Abstractions
 	// IExecutionCoordinator capability. The coordinator enforces them itself, qualified by the
 	// claimant (worker group) identity being acted as, so an in-process worker is held to the
 	// same grants as one calling in over a transport, and one group's credentials cannot claim,
-	// renew, or complete runs as another. Calls arriving with no principal at all are in-process
-	// by construction and are not checked.
+	// renew, or complete runs as another. Calls arriving with no principal at all are taken for
+	// in-process calls and are not checked (see IExecutionCoordinator).
 	public static class CoordinatorSecurityOperations
 	{
 		public static string ClaimJobs => "CLAIM_JOBS";

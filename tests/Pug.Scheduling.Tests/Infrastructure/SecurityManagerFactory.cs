@@ -32,10 +32,12 @@ internal static class SecurityManagerFactory
 	/// <summary>
 	/// Creates a security manager whose principal and authorization decisions are resolved per
 	/// call, so a single registration can serve requests made by different callers (endpoint
-	/// tests) rather than one fixed user.
+	/// tests) rather than one fixed user. <paramref name="hasPrincipal"/>, when given, decides per
+	/// call whether the caller is mapped to a principal at all; without it there always is one.
 	/// </summary>
 	internal static ISecurityManager CreateContextual( Func<string> currentUser,
-													Func<string, string, NounQualifier, bool> isAuthorized )
+													Func<string, string, NounQualifier, bool> isAuthorized,
+													Func<bool>? hasPrincipal = null )
 	{
 		Mock<IPrincipalIdentity> identity = new();
 		identity.Setup( x => x.Identifier ).Returns( currentUser );
@@ -51,7 +53,8 @@ internal static class SecurityManagerFactory
 								isAuthorized( currentUser(), operation, resource ) );
 
 		Mock<ISecurityManager> manager = new();
-		manager.Setup( x => x.CurrentPrincipal ).Returns( principal.Object );
+		manager.Setup( x => x.CurrentPrincipal )
+				.Returns( () => hasPrincipal is null || hasPrincipal() ? principal.Object : null! );
 
 		return manager.Object;
 	}

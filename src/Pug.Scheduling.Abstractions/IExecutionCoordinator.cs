@@ -16,6 +16,13 @@ namespace Pug.Scheduling.Abstractions
 	// worker's number within that group (1 or greater). Claims are held per worker
 	// ("claimant/worker"), so two workers of one group never share a claim, while a restarted
 	// worker presenting the same claimant and number re-takes the claims its predecessor held.
+	//
+	// SECURITY: the scheduler's implementation checks CoordinatorSecurityOperations only when
+	// ISecurityManager reports a principal; a call without one is trusted as in-process (D16).
+	// MapExecutionCoordinatorEndpoints never lets a call through without a principal. Any other
+	// transport bound to this interface on the scheduler side — a host's own controller, a gRPC
+	// service, a message consumer — must establish the caller's principal before calling it, or
+	// every coordinator grant is skipped for its callers.
 	public interface IExecutionCoordinator
 	{
 		// Atomically claims one due occurrence for the calling worker and returns it with its

@@ -19,10 +19,14 @@ public static class SchedulingEndpoints
 	/// routes alongside these. Pass
 	/// <c>app</c> to mount at the application root, or a <see cref="RouteGroupBuilder"/> from
 	/// <c>app.MapGroup("/your/prefix")</c> to mount the whole surface beneath a further prefix.
-	/// All endpoints require an authenticated caller, or the policies of
-	/// <see cref="SchedulingEndpointOptions.AuthorizationPolicies"/>; authorization (the schedule owner rule
-	/// followed by role-based ACLs) is enforced by <see cref="IScheduler"/> itself, so these
-	/// endpoints only translate its outcomes into HTTP results.
+	/// All endpoints require an authenticated caller whom the host's <see cref="ISecurityManager"/>
+	/// maps to a principal, plus the policies of
+	/// <see cref="SchedulingEndpointOptions.AuthorizationPolicies"/> (the host's <c>DefaultPolicy</c>
+	/// when it sets none); neither a host policy nor <c>AllowAnonymous()</c> on the returned group
+	/// lifts that (401 without
+	/// authentication, 403 without a principal). Authorization (the schedule owner rule followed by
+	/// role-based ACLs) is enforced by <see cref="IScheduler"/> itself, so these endpoints only
+	/// translate its outcomes into HTTP results.
 	/// Endpoints for externally hosted workers are mapped separately by
 	/// <see cref="ExecutionCoordinatorEndpoints.MapExecutionCoordinatorEndpoints"/>; worker
 	/// management endpoints live in <c>Pug.Scheduling.Worker.WebApi</c>, so a worker host need
@@ -41,16 +45,9 @@ public static class SchedulingEndpoints
 		// caller is, so an in-process caller is held to the same rules as one arriving here.
 		RouteGroupBuilder group = routes.MapGroup( ApiBasePaths.Normalize( options.BasePath, nameof(options.BasePath) ) );
 
-		// No policies (null or empty) means the default policy: authenticated callers only.
-		IReadOnlyList<string> policies = options.AuthorizationPolicies ?? Array.Empty<string>();
-
-		if( policies.Any( string.IsNullOrWhiteSpace ) )
-			throw new ArgumentException( "Authorization policy names must not be blank.", nameof(options) );
-
-		if( policies.Count == 0 )
-			group.RequireAuthorization();
-		else
-			group.RequireAuthorization( policies.ToArray() );
+		// An authenticated user is always required, whatever the host's policies; they are added
+		// to it, not substituted for it.
+		ApiAccess.RequireAuthenticatedPrincipal( group, options.AuthorizationPolicies, nameof(options) );
 
 		// Literal-segment routes are registered before parameterised routes of the same
 		// HTTP method to ensure the routing system resolves them correctly.

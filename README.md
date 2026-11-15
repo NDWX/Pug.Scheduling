@@ -135,13 +135,21 @@ app.MapExecutionCoordinatorEndpoints();  // executionCoordinator/...   (only if 
 app.MapSchedulerWorkerEndpoints();       // workers/...                (only if workers run here)
 
 // A different base path, and a policy (registered by the host with AddAuthorization) gating the API.
-// The policy decides who may call the API at all; the facades still enforce the grants.
+// The policy narrows who may call the API at all; the facades still enforce the grants.
 app.MapSchedulingEndpoints( new SchedulingEndpointOptions
 {
     BasePath = "api/v1/schedules",
     AuthorizationPolicies = new[] { "scheduling-api" }
 } );
 ```
+
+With no policies given, an API applies the host's `DefaultPolicy`; policies given are required
+together with an authenticated user. Either way, an endpoint filter guarantees an authenticated
+caller whom the host's `ISecurityManager` maps to a principal, regardless of the policies: neither a
+permissive policy nor `AllowAnonymous()` on the returned group admits anyone else. An
+unauthenticated caller is challenged (401); an authenticated one with no principal is forbidden
+(403). The filter resolves `ISecurityManager`, so a host mapping the scheduling or coordinator
+endpoints (a gateway, say) must register one; without it every request is a 500.
 
 `SchedulerClient` and `ExecutionCoordinatorClient` take the matching base path as an optional second argument
 (`new SchedulerClient( httpClient, "api/v1/schedules" )`); without one they use the defaults.
@@ -198,7 +206,8 @@ number: `GET workers`, `GET workers/{worker}`, `POST workers/{worker}/pause|resu
 
 ## Authorization
 
-Facades authorize; endpoints only require authentication and translate outcomes.
+Facades authorize; endpoints only require an authenticated caller with a principal and translate
+outcomes.
 
 - **Schedules** — the owner rule first: the schedule's `Owner` may create their own schedules and
   view, modify, and delete them with no ACL grant. Everyone else falls through to role-based
@@ -207,9 +216,15 @@ Facades authorize; endpoints only require authentication and translate outcomes.
   identifier as the object type and identifier) in the schedule's domain.
 - **Execution** — `CoordinatorSecurityOperations` on `SecurityObjectTypes.ExecutionCoordinator`,
   qualified by the **claimant identity being acted as**, so one worker cannot claim or complete
-  runs as another. A call arriving with no security principal at all is in-process by construction
-  (endpoints reject unauthenticated requests before dispatch) and is trusted — an in-process worker
-  needs no identity of its own.
+  runs as another. A call arriving with no security principal at all is taken for an in-process
+  one and is trusted — an in-process worker needs no identity of its own. Under no supported
+  configuration does a call through `MapExecutionCoordinatorEndpoints` arrive that way: their
+  endpoint filter refuses a caller without authentication or without a principal, whatever the
+  policies admit and even under `AllowAnonymous()`.
+  **Warning:** any other transport you put in front of the coordinator — your own controller, a gRPC
+  service, a message consumer — must establish the caller's principal before calling
+  `IExecutionCoordinator`. Otherwise the coordinator takes its calls for in-process ones and skips
+  every grant.
 - **Worker management** — `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`,
   qualified by the addressed worker's claimant; `GET workers` lists only the workers the caller
   may view. No owner exemption: this is an operator concern.

@@ -23,9 +23,14 @@ public static class ExecutionCoordinatorEndpoints
 	/// Authorization is the coordinator's own, not these endpoints': every operation requires the
 	/// relevant <see cref="CoordinatorSecurityOperations"/> grant on the claimant identity being
 	/// acted as, enforced inside <see cref="IExecutionCoordinator"/> so an in-process worker is
-	/// held to exactly the same rules. These endpoints only require an authenticated caller (or the policies of
-	/// <see cref="ExecutionCoordinatorEndpointOptions.AuthorizationPolicies"/>) and
-	/// translate the outcome into HTTP results.
+	/// held to exactly the same rules. These endpoints only require an authenticated caller whom the
+	/// host's <see cref="ISecurityManager"/> maps to a principal, plus the policies of
+	/// <see cref="ExecutionCoordinatorEndpointOptions.AuthorizationPolicies"/> (the host's
+	/// <c>DefaultPolicy</c> when it sets none),
+	/// and translate the outcome into HTTP results. Neither a host policy nor <c>AllowAnonymous()</c>
+	/// on the returned group lifts that requirement (401 without authentication, 403 without a
+	/// principal): the coordinator skips its grant check for a call without a principal, trusting it
+	/// as in-process, so no transport call may ever arrive without one.
 	/// Returns the endpoints' route group so the host can add further conventions to them.
 	/// </summary>
 	public static RouteGroupBuilder MapExecutionCoordinatorEndpoints( this IEndpointRouteBuilder routes,
@@ -38,16 +43,9 @@ public static class ExecutionCoordinatorEndpoints
 		// caller is, so an in-process caller is held to the same rules as one arriving here.
 		RouteGroupBuilder group = routes.MapGroup( ApiBasePaths.Normalize( options.BasePath, nameof(options.BasePath) ) );
 
-		// No policies (null or empty) means the default policy: authenticated callers only.
-		IReadOnlyList<string> policies = options.AuthorizationPolicies ?? Array.Empty<string>();
-
-		if( policies.Any( string.IsNullOrWhiteSpace ) )
-			throw new ArgumentException( "Authorization policy names must not be blank.", nameof(options) );
-
-		if( policies.Count == 0 )
-			group.RequireAuthorization();
-		else
-			group.RequireAuthorization( policies.ToArray() );
+		// An authenticated user is always required, whatever the host's policies; they are added
+		// to it, not substituted for it.
+		ApiAccess.RequireAuthenticatedPrincipal( group, options.AuthorizationPolicies, nameof(options) );
 
 		group.MapPost( "JobRunClaims", ClaimDueJob )
 			.WithName( "ClaimDueJob" )

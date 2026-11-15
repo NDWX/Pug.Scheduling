@@ -14,9 +14,12 @@ public class SchedulerWorkerEndpointOptions
 	public string BasePath { get; set; } = ApiBasePaths.Workers;
 
 	/// <summary>
-	/// Policies every endpoint of the API requires, enforced as one <c>RequireAuthorization</c> on
-	/// the route group. Empty means the host's default policy (an authenticated caller). Names
-	/// must not be blank; the host registers the policies themselves.
+	/// Policies every endpoint of the API requires, applied on the route group. Empty means the
+	/// host's <c>DefaultPolicy</c>. Given, they are required together with an authenticated user
+	/// (and the <c>DefaultPolicy</c> is not applied). Either way the API's endpoint filter refuses
+	/// a caller without authentication (401) or without a principal from the host's
+	/// <c>ISecurityManager</c> (403), so no policy can admit one. Names must not be blank; the host
+	/// registers the policies themselves.
 	/// </summary>
 	public IReadOnlyList<string> AuthorizationPolicies { get; set; } = Array.Empty<string>();
 }

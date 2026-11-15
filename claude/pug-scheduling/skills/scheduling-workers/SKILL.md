@@ -180,13 +180,13 @@ A worker presenting the **same claimant and number** is the same lease holder. A
 app.MapSchedulerWorkerEndpoints( new SchedulerWorkerEndpointOptions { BasePath = "ops/workers", AuthorizationPolicies = new[] { "operators" } } );
 ```
 
-- **Options:** `BasePath` (default `workers`) and `AuthorizationPolicies` (default: an authenticated caller), as for the scheduler's endpoints. The call returns the `RouteGroupBuilder`.
-- **Policies given replace the default policy.** The 401s below assume your policies (or your default policy) require an authenticated user; use a bearer or API-key scheme, not cookies, which turn 401 and 403 into redirects.
+- **Options:** `BasePath` (default `workers`) and `AuthorizationPolicies` (default: your `DefaultPolicy`), as for the scheduler's endpoints. The call returns the `RouteGroupBuilder`.
+- **An authenticated caller with a principal is always required.** No policy and no `.AllowAnonymous()` on the group lifts it: no authentication is 401, and an authenticated caller your `ISecurityManager` maps to no principal is 403. Use a bearer or API-key scheme, not cookies, which turn 401 and 403 into redirects.
 - **These endpoints check the grants themselves:** `WorkerSecurityOperations` (`GET_INFO`, `PAUSE`, `RESUME`) on `{ Type = "SCHEDULER_WORKER", Identifier = the worker's claimant }`. There is no owner rule.
 
 | Route | Success | Errors |
 |---|---|---|
-| `GET workers` | 200 `WorkerInfo[]`, only workers whose claimant the caller holds `GET_INFO` on (possibly empty) | 401 |
+| `GET workers` | 200 `WorkerInfo[]`, only workers whose claimant the caller holds `GET_INFO` on (possibly empty) | 401, 403 (no principal or a refused policy) |
 | `GET workers/{worker}` | 200 `WorkerInfo` | 401, 403, 404 unknown number |
 | `POST workers/{worker}/pause` · `/resume` | 200 `WorkerInfo`, after the change | 401, 403, 404 |
 
