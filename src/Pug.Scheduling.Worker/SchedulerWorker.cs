@@ -151,6 +151,11 @@ namespace Pug.Scheduling.Worker
 			}
 		}
 
+		// The poll loop; ends only when the host stops the worker. Each iteration is one of:
+		// - not claiming (paused, or at the detached limit): wait for a state change (resume, a
+		//   detached handler ending) or the host stopping, with no time limit;
+		// - claimed a job: attend it to completion or detachment, then poll again at once;
+		// - nothing due (or the claim failed): wait PollInterval, cut short by a state change.
 		private async Task PumpAsync( CancellationToken stoppingToken )
 		{
 			while( !stoppingToken.IsCancellationRequested )
@@ -213,9 +218,13 @@ namespace Pug.Scheduling.Worker
 		}
 
 		// Whether MaxDetachedHandlers detached handlers are still running, so claiming is suspended.
+		// A detached handler is still running and the worker cannot stop it; the limit stops stuck
+		// handlers from piling up without bound. The count falls in AwaitDetachedAsync.
 		private bool AtDetachedLimit() => Volatile.Read( ref _detachedJobs ) >= _options.MaxDetachedHandlers;
 
-		// Logs the suspension of claiming once (an Error), and its resumption.
+		// Logs the suspension of claiming once (an Error), and its resumption. Called every loop
+		// iteration with the current state; only a change of state logs, so a long suspension is
+		// one entry, not one per wake-up.
 		private void LogClaimingTransition( bool suspended )
 		{
 			if( suspended == _claimingSuspended )
@@ -236,7 +245,10 @@ namespace Pug.Scheduling.Worker
 						_options.Claimant, _worker, _jobTypeFilter, detached );
 		}
 
-		// Waits until the signal completes, the delay elapses, or cancellation is requested.
+		// Waits until the signal completes, the delay elapses, or cancellation is requested,
+		// whichever is first; Timeout.InfiniteTimeSpan removes the delay bound. Never throws on
+		// cancellation: callers inspect their own state (the signal's task, the token) to see which
+		// ended the wait.
 		private static async Task WaitForAsync( Task signal, TimeSpan delay, CancellationToken cancellationToken )
 		{
 			using CancellationTokenSource delayCancellation =
@@ -261,6 +273,12 @@ namespace Pug.Scheduling.Worker
 
 		// Executes a claimed job under attendance, then reports its outcome, abandons it, or —
 		// when the handler would not stop — detaches it.
+		//
+		// Steps: reject an unusable timeout (reported as failed, handler never started); start the
+		// handler; attend it (ExecuteAttendedAsync: heartbeat, timeout, grace); classify the result;
+		// then either dispose the run's cancellation (handler ended) or detach (handler still
+		// running); finally report, or for an abandoned run release the claim if that is safe.
+		// Report and claim release come after Detach so a slow coordinator cannot delay detaching.
 		private async Task ProcessJobAsync( ClaimedJob job, CancellationToken stoppingToken )
 		{
 			Interlocked.Increment( ref _activeJobs );
@@ -293,12 +311,14 @@ namespace Pug.Scheduling.Worker
 
 				RunReport report = ClassifyOutcome( job, run, finished, cancellation );
 
-				// The run's cancellation is the handler's until it ends.
+				// The run's cancellation is the handler's until it ends: disposed here if it ended,
+				// otherwise handed to Detach, which disposes it when the handler ends.
 				if( finished )
 					cancellation.Dispose();
 				else
 					Detach( job, run, cancellation, stopwatch );
 
+				// A null report means abandoned (claim lost, or host stopping).
 				if( report is not null )
 					await ReportAsync( job, report, stopwatch ).ConfigureAwait( false );
 				else if( finished && ReleasesClaimOnAbandon( cancellation ) )
@@ -310,14 +330,29 @@ namespace Pug.Scheduling.Worker
 			}
 		}
 
-		// Runs the handler off the pump's thread, so that a handler blocking synchronously cannot
-		// stall the worker either.
+		// Runs the handler off the pump's thread (Task.Run): the factory and the handler's synchronous
+		// prefix are third-party code, so one that blocks synchronously cannot stall the pump, the
+		// heartbeat or the timeout. The token is the run's, not the worker's, so only a stop signal
+		// of this run cancels it.
 		private Task<JobOutcome> StartHandler( ClaimedJob job, CancellationToken cancellationToken ) =>
 			Task.Run( () => RunHandlerAsync( job, cancellationToken ), CancellationToken.None );
 
-		// Heartbeats the claim while waiting for the handler to finish or a stop signal (timeout,
-		// claim lost, host stopping). A stopped handler has been cancelled and is given
-		// CancellationGrace to finish. Returns whether it finished; the heartbeat stops either way.
+		// Watches a running handler until it finishes or the worker gives up on it. Returns true if
+		// it finished (the caller classifies its outcome); false if it is still running after being
+		// stopped and given its grace period (the caller detaches it).
+		//
+		// Heartbeat: renews the claim for as long as the worker watches, including the grace. A
+		// refused renewal is a lost claim: the heartbeat calls LoseClaim, which stops the run.
+		//
+		// Phase 1, run: WaitForAsync( run, InfiniteTimeSpan, cancellation.Token ) ends when the
+		// handler finishes or the run is stopped, i.e. cancellation.Token is cancelled: the schedule
+		// timeout (RunCancellation's timeout watcher), claim lost, or the host stopping.
+		// InfiniteTimeSpan means no limit beyond those.
+		//
+		// Phase 2, grace: only when the run was stopped while the handler was still running. The
+		// handler's token has just been cancelled, and it gets CancellationGrace to notice and
+		// finish. That wait uses CancellationToken.None deliberately, so a cooperative handler gets
+		// its grace even during shutdown.
 		private async Task<bool> ExecuteAttendedAsync( ClaimedJob job, Task<JobOutcome> run, RunCancellation cancellation )
 		{
 			using CancellationTokenSource heartbeatStop = new();
@@ -326,8 +361,11 @@ namespace Pug.Scheduling.Worker
 
 			try
 			{
+				// Phase 1: until the handler finishes or the run is stopped (timeout, claim lost,
+				// host stopping); no other limit.
 				await WaitForAsync( run, Timeout.InfiniteTimeSpan, cancellation.Token ).ConfigureAwait( false );
 
+				// Phase 2: stopped but still running; bounded by CancellationGrace, never cancelled.
 				if( !run.IsCompleted )
 					await WaitForAsync( run, _options.CancellationGrace, CancellationToken.None ).ConfigureAwait( false );
 
@@ -335,6 +373,10 @@ namespace Pug.Scheduling.Worker
 			}
 			finally
 			{
+				// The heartbeat ran through the grace because the handler may still finish
+				// legitimately, so the claim must stay held. It stops only now, when watching ends
+				// (finished or detached), and is awaited so no renewal happens after the run is
+				// reported.
 				await heartbeatStop.CancelAsync().ConfigureAwait( false );
 
 				await heartbeat.ConfigureAwait( false );
@@ -342,15 +384,21 @@ namespace Pug.Scheduling.Worker
 		}
 
 		// What to report for a run no longer attended; null abandons it without reporting.
+		//
+		// Precedence when several stop reasons coincide: timeout > claim lost / host stopping >
+		// exception. A lost claim is never reported (a peer may already own the occurrence).
 		private RunReport ClassifyOutcome( ClaimedJob job, Task<JobOutcome> run, bool finished, RunCancellation cancellation ) =>
 			finished ? ClassifyFinished( job, run, cancellation ) : ClassifyDetached( job, cancellation );
 
+		// The handler ended (normally, by exception, or by honouring cancellation); the run is
+		// already complete, so GetResult does not block.
 		private RunReport ClassifyFinished( ClaimedJob job, Task<JobOutcome> run, RunCancellation cancellation )
 		{
 			RunReport report;
 
-			// Catch order: a timeout firing during a shutdown-initiated grace reports TIMED_OUT, the
-			// same as when the handler ends within the grace.
+			// Catch order is the precedence: a timeout firing during a shutdown-initiated grace reports
+			// TIMED_OUT, the same as when the handler ends within the grace. A cancellation exception
+			// caused by claim loss or shutdown abandons; any other exception is a failed run.
 			try
 			{
 				report = Completed( job, run.GetAwaiter().GetResult() );
@@ -370,6 +418,7 @@ namespace Pug.Scheduling.Worker
 				report = Threw( job, exception );
 			}
 
+			// The handler completed, but not under the claim: even a clean outcome is dropped.
 			if( cancellation.ClaimLost )
 			{
 				_logger.LogWarning(
@@ -452,7 +501,8 @@ namespace Pug.Scheduling.Worker
 
 		// Whether an unreported run should have its claim released: only when the host is stopping
 		// and the handler has stopped. A lost claim holds nothing to release, and a detached
-		// handler is still running, so its claim must lapse rather than let a peer adopt the run.
+		// handler is still running, so its claim must lapse rather than let a peer adopt the run
+		// while the old handler is still working on it. (The caller passes only finished runs.)
 		private static bool ReleasesClaimOnAbandon( RunCancellation cancellation ) =>
 			cancellation.HostStopping && !cancellation.ClaimLost;
 
@@ -479,8 +529,11 @@ namespace Pug.Scheduling.Worker
 			}
 		}
 
-		// Leaves a handler that ignored cancellation to end on its own. Its run's cancellation and
-		// the handler itself (disposed by RunHandlerAsync) are released when it ends.
+		// Leaves a handler that ignored cancellation to end on its own. Nothing bounds how long that
+		// takes; MaxDetachedHandlers bounds how many may accumulate. Ownership moves to
+		// AwaitDetachedAsync: the handler itself is disposed by RunHandlerAsync when it ends, and the
+		// run's RunCancellation (whose token the handler may still hold) is disposed by
+		// AwaitDetachedAsync, never earlier.
 		private void Detach( ClaimedJob job, Task<JobOutcome> run, RunCancellation cancellation, Stopwatch stopwatch )
 		{
 			int detached = Interlocked.Increment( ref _detachedJobs );
@@ -494,6 +547,9 @@ namespace Pug.Scheduling.Worker
 			_ = AwaitDetachedAsync( job, run, cancellation, stopwatch );
 		}
 
+		// Observes the detached handler until it ends, however long that takes, only to log it and
+		// release what it held. Its outcome is never reported: the run was already reported
+		// (TIMED_OUT) or abandoned when it was detached.
 		private async Task AwaitDetachedAsync( ClaimedJob job, Task<JobOutcome> run, RunCancellation cancellation,
 												Stopwatch stopwatch )
 		{
@@ -517,10 +573,12 @@ namespace Pug.Scheduling.Worker
 			}
 			finally
 			{
+				// The handler has ended, so nothing can still observe the token.
 				cancellation.Dispose();
 
 				Interlocked.Decrement( ref _detachedJobs );
 
+				// Wakes a pump suspended at the detached limit so it can claim again.
 				SignalStateChanged();
 			}
 		}
@@ -624,6 +682,10 @@ namespace Pug.Scheduling.Worker
 		// Renews the job's claim on a fixed cadence until stopped. Transient renewal errors are
 		// tolerated (the lease outlives one missed heartbeat); a definitive 'no longer held'
 		// answer abandons the run.
+		//
+		// Bounded by stopToken, which ExecuteAttendedAsync cancels when watching ends, or by a
+		// refused renewal (onClaimLost stops the run, then the heartbeat ends). Cancellation during
+		// the delay or renewal is the normal way out.
 		private async Task HeartbeatAsync( ClaimedJob job, Action onClaimLost, CancellationToken stopToken )
 		{
 			try
@@ -683,6 +745,12 @@ namespace Pug.Scheduling.Worker
 		// trigger therefore goes through Cancel, which records the reason first and then contains
 		// a throwing callback: it is logged and cannot fault that thread (the token is cancelled
 		// regardless).
+		//
+		// For the same reason the timeout is not a timer-based CancellationTokenSource
+		// (CancelAfter): its callbacks would run unguarded on a timer thread, where an exception
+		// would be unhandled. The timeout is a Task.Delay awaited by CancelOnTimeoutAsync, which
+		// calls the guarded Cancel. The reason flags are set before cancelling so that anyone
+		// woken by the token sees why.
 		private sealed class RunCancellation : IDisposable
 		{
 			private readonly CancellationTokenSource _execution = new();
@@ -719,6 +787,7 @@ namespace Pug.Scheduling.Worker
 				Cancel();
 			}
 
+			// Bounded by the timeout, or by Dispose when the run ends first.
 			private async Task CancelOnTimeoutAsync( TimeSpan timeout )
 			{
 				try
@@ -736,6 +805,8 @@ namespace Pug.Scheduling.Worker
 				Cancel();
 			}
 
+			// The one guarded way to stop the run; safe from any thread, and after disposal (a late
+			// trigger finds the run already ended).
 			private void Cancel()
 			{
 				try
@@ -752,6 +823,8 @@ namespace Pug.Scheduling.Worker
 				}
 			}
 
+			// Called once the handler has ended (attended or detached): stops the timeout watcher and
+			// unhooks the host-stopping registration, so nothing outlives the run.
 			public void Dispose()
 			{
 				_disposed.Cancel();
