@@ -553,7 +553,7 @@ row and a separate lease. And no deciding read shared a transaction with its wri
   `OccurrenceState.Classify` (adopt > MANUAL > RETRY > MISFIRE/SKIP/SCHEDULE),
   `CompletionRules` (retry, manual-run rules, baselines) and `DefinitionRules` (when `nextRun` may
   change). **`IDataSession` holds storage primitives only**: reads (`GetScheduleAsync`/
-  `GetScheduleByActiveRunAsync( …, lockRow )`, `GetDueCandidatesAsync`, runs) and unconditional
+  `GetScheduleByActiveRunAsync( …, RowLock )`, `GetDueCandidatesAsync`, runs) and unconditional
   writes by identifier (`SetExecutionAsync`, `SetOccurrenceStateAsync`, …). No session method
   encodes a rule. The due query is the one place where SQL mirrors policy: a coarse pre-filter for
   index use, documented as mirroring `Classify`, returning a superset; the decision is re-made on
@@ -568,8 +568,23 @@ row and a separate lease. And no deciding read shared a transaction with its wri
 - **Delete locks the row first**, then removes runs and the schedule in one unit; a worker mid-run
   fails its next renewal and its completion gets `UnknownRunException` (unchanged behaviour).
 - **Failing candidates are isolated:** a candidate that fails is logged at Error and the claim moves
-  on (#7), but when every candidate failed (none claimed, none handled as "no longer qualifies"),
-  the claim rethrows the last failure rather than reporting an idle window.
+  on (#7), but when every candidate failed (none claimed, none handled as "no longer qualifies"
+  or passed over), the claim rethrows the last failure rather than reporting an idle window.
+- **Claim lock mode (amended in #14):** the claim's per-candidate lock is `RowLock.SkipLocked`
+  (Postgres `for update skip locked`); every other locking read (renew, abandon, complete, run-now,
+  pause, definition update, delete) is `RowLock.Wait`. Concurrent claims read the same window in
+  the same order, so waiting queued every coordinator behind the first candidate's holder, usually
+  only to find it claimed. A skipped row reads as null, which the claim already treated as "next
+  candidate" (logged at Debug as held by another unit or deleted); it is handled, not failed, for
+  the rethrow above. Skipping is safe for the claim alone: it decides nothing on the skipped row,
+  and a row still due after its holder commits is claimed at a later poll; when every candidate of
+  the window is held, the claim reports no work and the worker polls again after `PollInterval`.
+  Anywhere else a skipped row would read as "not held" or "missing": a renewal would tell its
+  worker to abandon a run it owns, a completion would be refused, a management write would report
+  the schedule unknown. Measured on Postgres 17 (Testcontainers, 200 due schedules, runs left
+  active so the claim is the only locking read, each coordinator claiming back to back, median of
+  3): no gain at 1–4 coordinators; at 8, 312 → 480 claims/s; at 16, 215 → 315 claims/s, p95 claim
+  latency 66 → 39 ms; the share of busy backends waiting on a lock fell from 47–55 % to 0.
 - **Clocks (amended in #12):** `ExecutionCoordinator` and `Scheduler` take an `ISchedulingClock`
   (`Pug.Scheduling`), not a `TimeProvider`. Every coordination decision and every time they write —
   due-ness (the candidate read included), misfire classification, lease expiry on claim, adoption,
@@ -612,8 +627,11 @@ Microsoft.Data.Sqlite ignores `TransactionScope`, so on SQLite every statement a
   Nothing in the domain layer begins or commits a transaction, and no unit joins a caller's
   `TransactionScope`.
 - **Postgres row locks:** a write unit that acts on what it read reads the row with `for update`
-  (`lockRow`, a dialect override). The loser of a race waits and then decides on the committed row,
-  instead of failing with `40001` under Serializable (D21, D22).
+  (`RowLock.Wait`; the dialect override `LockingReadClause( RowLock )`). The loser of a race waits
+  and then decides on the committed row, instead of failing with `40001` under Serializable (D21,
+  D22). The claim alone uses `RowLock.SkipLocked`, `for update skip locked` (D23, #14). SQLite
+  maps every mode to no clause: its `IMMEDIATE` write unit holds the database write lock, so there
+  is no row contention to wait on or skip, and a claim there waits for a peer's whole unit.
 - **Shared `DapperDataSessionBase`** (new `Pug.Scheduling.Data.Dapper`): the SQL, row types,
   `Compose` and the JSON handler are written once. Providers override only the dialect:
   enabled/paused predicate, run-requested predicate, locking clause, current-time expression (#12,
@@ -736,7 +754,8 @@ Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
   reconciliation — **DONE (310 tests)**, awaiting the user's single review (no pause between
   sub-phases, by user decision, for this work only). Closes #7, #8, #9. Follow-ups: **#11**
   (`AbandonClaimAsync`: graceful shutdown releases the lease; **DONE**, D27), **#12** (database-clock lease expiry: `ISchedulingClock`, `DatabaseClock` by default; **DONE**, D23),
-  **#13** (shared SQLite enlistment package), **#14** (`for update skip locked` on Postgres claims).
+  **#13** (shared SQLite enlistment package), **#14** (`for update skip locked` on Postgres claims;
+  **implemented**, D23 amendment, awaiting review).
 - **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
   handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).

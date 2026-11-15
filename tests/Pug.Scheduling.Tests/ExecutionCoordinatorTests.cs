@@ -147,6 +147,49 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 				job.Context.Run, Claimant, worker, result,
 				new JobOutcome { Successful = result == RunResults.Succeeded } );
 
+	// True when the store locks single rows (Postgres); false when a write unit holds the whole
+	// database's write lock instead (SQLite's BEGIN IMMEDIATE), so no two units contend for a row.
+	protected abstract bool LocksRows { get; }
+
+	// Bounds a transition that must not wait for a held row. A transition that does wait would
+	// wait until the holder is released, which these tests do only after the bound, so the bound
+	// never decides a pass: it only turns a wait into a failure instead of a hang.
+	private static readonly TimeSpan NoWaitBound = TimeSpan.FromSeconds( 5 );
+
+	// How long a transition that must wait is observed still waiting before its holder is released.
+	// A shorter span could only let a non-waiting transition pass unnoticed, never fail a correct one.
+	private static readonly TimeSpan ObservedWait = TimeSpan.FromMilliseconds( 300 );
+
+	// Opens a write unit of its own, on its own connection, that locks the schedule's row (RowLock.Wait)
+	// and keeps it locked until the returned release completes: a peer's transition caught mid-unit.
+	// On SQLite the unit holds the database's write lock instead. Returns once the lock is held; the
+	// returned unit ends (commits, having written nothing) after release.
+	private async Task<(Task Unit, TaskCompletionSource Release)> HoldRowAsync( string schedule )
+	{
+		TaskCompletionSource locked = new( TaskCreationOptions.RunContinuationsAsynchronously );
+		TaskCompletionSource release = new( TaskCreationOptions.RunContinuationsAsynchronously );
+
+		Task unit = Task.Run(
+				() => _scheduleDatabase.ApplicationData.WriteAsync(
+						async ( session, context ) =>
+						{
+							await session.GetScheduleAsync( context, RowLock.Wait );
+
+							locked.SetResult();
+
+							await release.Task;
+						},
+						schedule ) );
+
+		// A unit that failed before locking would otherwise leave this waiting forever.
+		await Task.WhenAny( locked.Task, unit ).WaitAsync( NoWaitBound );
+
+		if( unit.IsFaulted )
+			await unit;
+
+		return ( unit, release );
+	}
+
 	// == Claim ==
 
 	[Fact]
@@ -400,6 +443,47 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		Assert.Equal( "peer/1", ( await GetScheduleAsync( contested ) ).ExecutionLease.ClaimedBy );
 		Assert.Single( await GetRunsAsync( contested ) );
+	}
+
+	// #14: a claim passes over a candidate whose row another unit holds, instead of queuing on it.
+	// On Postgres the held candidate (first in the window) is skipped and the next one claimed at
+	// once; released, it is claimable again. On SQLite nothing is skipped: the holder's unit holds
+	// the database's write lock, so the claim waits for it whole and then claims the first candidate.
+	[Fact]
+	public async Task ClaimPassesOverACandidateWhoseRowAPeerHolds()
+	{
+		string held = await InsertScheduleAsync( Now.AddMinutes( -2 ) );
+		string next = await InsertDueScheduleAsync();
+
+		(Task unit, TaskCompletionSource release) = await HoldRowAsync( held );
+
+		Task<ClaimedJob?> claim;
+
+		try
+		{
+			// Off the test's thread: SQLite's BEGIN IMMEDIATE waits for the write lock synchronously.
+			claim = Task.Run( () => _coordinator.ClaimDueJobAsync( Claimant, 1, _jobType ) );
+
+			if( LocksRows )
+				Assert.Equal( next, ( await claim.WaitAsync( NoWaitBound ) )?.Context.Schedule );
+			else
+			{
+				await Task.Delay( ObservedWait );
+
+				Assert.False( claim.IsCompleted, "On SQLite the claim should wait for the holder's unit." );
+			}
+		}
+		finally
+		{
+			release.TrySetResult();
+		}
+
+		await unit;
+
+		if( LocksRows )
+			await ClaimSingleAsync( held, worker: 2 );
+		else
+			Assert.Equal( held, ( await claim.WaitAsync( NoWaitBound ) )?.Context.Schedule );
 	}
 
 	[Fact]
@@ -812,6 +896,76 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 
 		Assert.False( await _coordinator.RenewClaimAsync( job.Context.Run, Claimant, 1 ) );
 		Assert.True( await _coordinator.RenewClaimAsync( job.Context.Run, Claimant, 2 ) );
+	}
+
+	// Renewal waits for another unit holding the schedule's row and then renews (#14): skipping the
+	// row would read as "no active run" and tell the worker to abandon a run it still holds.
+	[Fact]
+	public async Task RenewWaitsForARowAPeerHoldsThenRenews()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule );
+
+		_clock.Advance( TimeSpan.FromSeconds( 30 ) );
+
+		(Task unit, TaskCompletionSource release) = await HoldRowAsync( schedule );
+
+		Task<bool> renewal;
+
+		try
+		{
+			// Off the test's thread: SQLite's BEGIN IMMEDIATE waits for the write lock synchronously.
+			renewal = Task.Run( () => _coordinator.RenewClaimAsync( job.Context.Run, Claimant, 1 ) );
+
+			await Task.Delay( ObservedWait );
+
+			Assert.False( renewal.IsCompleted, "The renewal should wait for the holder's unit." );
+		}
+		finally
+		{
+			release.TrySetResult();
+		}
+
+		await unit;
+
+		Assert.True( await renewal.WaitAsync( NoWaitBound ) );
+		Assert.Equal( Now + LeaseDuration, ( await GetScheduleAsync( schedule ) ).ExecutionLease.Expiry );
+	}
+
+	// Completion waits for another unit holding the schedule's row and then completes (#14):
+	// skipping the row would read as "run no longer active" and refuse the holder's completion.
+	[Fact]
+	public async Task CompletionWaitsForARowAPeerHoldsThenCompletes()
+	{
+		string schedule = await InsertDueScheduleAsync();
+
+		ClaimedJob job = await ClaimSingleAsync( schedule );
+
+		(Task unit, TaskCompletionSource release) = await HoldRowAsync( schedule );
+
+		Task completion;
+
+		try
+		{
+			// Off the test's thread: SQLite's BEGIN IMMEDIATE waits for the write lock synchronously.
+			completion = Task.Run( () => CompleteAsync( job ) );
+
+			await Task.Delay( ObservedWait );
+
+			Assert.False( completion.IsCompleted, "The completion should wait for the holder's unit." );
+		}
+		finally
+		{
+			release.TrySetResult();
+		}
+
+		await unit;
+
+		await completion.WaitAsync( NoWaitBound );
+
+		Assert.NotNull( Assert.Single( await GetRunsAsync( schedule ) ).Finished );
+		Assert.Null( ( await GetScheduleAsync( schedule ) ).ExecutionLease );
 	}
 
 	// == Abandon ==
@@ -1564,6 +1718,8 @@ public sealed class SqliteExecutionCoordinatorTests
 	public SqliteExecutionCoordinatorTests( SqliteScheduleDatabaseFixture scheduleDatabase ) : base( scheduleDatabase )
 	{
 	}
+
+	protected override bool LocksRows => false;
 }
 
 [Trait( "Category", "Postgres" )]
@@ -1573,4 +1729,6 @@ public sealed class PostgresExecutionCoordinatorTests
 	public PostgresExecutionCoordinatorTests( PostgresScheduleDatabaseFixture scheduleDatabase ) : base( scheduleDatabase )
 	{
 	}
+
+	protected override bool LocksRows => true;
 }

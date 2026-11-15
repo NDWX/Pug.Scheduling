@@ -12,7 +12,7 @@ namespace Pug.Scheduling.Data.Abstractions
 	// a rule. Due-ness, adoption, misfire, retry, manual-run rules, run-now refusal and when the
 	// next occurrence may change are all decided by the callers, which compose primitives into
 	// units of work (UnitsOfWork): every provider makes a unit one local transaction. A unit that
-	// acts on what it read locks the row first (lockRow), decides, and writes the decided values.
+	// acts on what it read locks the row first (RowLock), decides, and writes the decided values.
 	//
 	// The execution lease lives on the schedule row (active run, holder, expiry) and is written
 	// only by the execution coordinator's transitions.
@@ -31,14 +31,15 @@ namespace Pug.Scheduling.Data.Abstractions
 
 		Task InsertAsync( ScheduleInfo schedule );
 
-		// lockRow holds the row's write lock until the unit of work ends, so the unit can act on
-		// what it read (a write unit only; Postgres 'for update'). SQLite needs no row lock: its
-		// write unit holds the database write lock from its first statement.
-		Task<ScheduleInfo?> GetScheduleAsync( string identifier, bool lockRow = false );
+		// The schedule, or null when there is none - or, with RowLock.SkipLocked, when another unit
+		// holds its row. rowLock other than None holds the row's lock until the unit of work ends,
+		// so the unit can act on what it read (a write unit only). SQLite takes no row lock in any
+		// mode: its write unit holds the database write lock from its first statement.
+		Task<ScheduleInfo?> GetScheduleAsync( string identifier, RowLock rowLock = RowLock.None );
 
 		// The schedule whose active run is the given run, or null when no schedule has it active
-		// (the run finished, or it and its schedule were deleted). lockRow as for GetScheduleAsync.
-		Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, bool lockRow = false );
+		// (the run finished, or it and its schedule were deleted). rowLock as for GetScheduleAsync.
+		Task<ScheduleInfo?> GetScheduleByActiveRunAsync( string run, RowLock rowLock = RowLock.None );
 
 		// Lists schedules within a domain, optionally filtered by owner principal and/or job
 		// type. Never crosses domains.

@@ -140,13 +140,15 @@ namespace Pug.Scheduling
 		}
 
 		// A write unit that locks the schedule row and applies write to what it locked. The
-		// schedule may have been deleted since it was authorized: UnknownScheduleException then.
+		// schedule may have been deleted since it was authorized: UnknownScheduleException then. The
+		// lock waits for a concurrent holder (a claim or completion of the schedule) rather than
+		// skipping: a held row would read as deleted.
 		private Task InLockedUnitAsync( string identifier, Func<IDataSession, ScheduleInfo, Task> write ) =>
 			ApplicationDataProvider.WriteAsync(
 					async ( session, context ) =>
 					{
 						ScheduleInfo locked =
-							await session.GetScheduleAsync( context.identifier, lockRow: true ).ConfigureAwait( false ) ??
+							await session.GetScheduleAsync( context.identifier, RowLock.Wait ).ConfigureAwait( false ) ??
 							throw new UnknownScheduleException( context.identifier );
 
 						await context.write( session, locked ).ConfigureAwait( false );

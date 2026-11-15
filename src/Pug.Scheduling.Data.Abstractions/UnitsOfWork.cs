@@ -8,7 +8,7 @@ namespace Pug.Scheduling.Data.Abstractions
 	// transaction of its own (RequiresNew), never in a caller's ambient one, whose isolation level
 	// could conflict with the one the store needs:
 	// - Writes run at ReadCommitted. A write unit that acts on what it read locks that row first
-	//   (IDataSession.GetScheduleAsync lockRow); at a stricter level, Postgres would fail a writer
+	//   (IDataSession.GetScheduleAsync, RowLock.Wait); at a stricter level, Postgres would fail a writer
 	//   that waited for the lock (40001, could not serialize access due to concurrent update)
 	//   instead of letting it proceed on the committed row (DECISIONS D21, D22).
 	// - Reads run at RepeatableRead, so every statement of one read sees the same snapshot; a
