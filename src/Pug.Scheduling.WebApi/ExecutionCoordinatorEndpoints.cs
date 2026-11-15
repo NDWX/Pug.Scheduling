@@ -13,8 +13,8 @@ namespace Pug.Scheduling.WebApi;
 public static class ExecutionCoordinatorEndpoints
 {
 	/// <summary>
-	/// Maps the execution coordinator's endpoints, under their own <c>executionCoordinator/</c>
-	/// prefix, onto the given route builder — the transport an externally hosted worker binds its
+	/// Maps the execution coordinator's endpoints, under
+	/// <see cref="ExecutionCoordinatorEndpointOptions.BasePath"/> (default <c>executionCoordinator</c>), onto the given route builder — the transport an externally hosted worker binds its
 	/// <see cref="IExecutionCoordinator"/> to. Hosts whose workers all run in-process need not map
 	/// them: an in-process worker resolves the coordinator directly.
 	/// The contract is <see cref="IExecutionCoordinator"/> unchanged — due-ness, claim semantics,
@@ -23,31 +23,46 @@ public static class ExecutionCoordinatorEndpoints
 	/// Authorization is the coordinator's own, not these endpoints': every operation requires the
 	/// relevant <see cref="CoordinatorSecurityOperations"/> grant on the claimant identity being
 	/// acted as, enforced inside <see cref="IExecutionCoordinator"/> so an in-process worker is
-	/// held to exactly the same rules. These endpoints only require an authenticated caller and
+	/// held to exactly the same rules. These endpoints only require an authenticated caller (or the policies of
+	/// <see cref="ExecutionCoordinatorEndpointOptions.AuthorizationPolicies"/>) and
 	/// translate the outcome into HTTP results.
+	/// Returns the endpoints' route group so the host can add further conventions to them.
 	/// </summary>
-	public static IEndpointRouteBuilder MapExecutionCoordinatorEndpoints( this IEndpointRouteBuilder routes )
+	public static RouteGroupBuilder MapExecutionCoordinatorEndpoints( this IEndpointRouteBuilder routes,
+																								ExecutionCoordinatorEndpointOptions? options = null )
 	{
-		routes.MapPost( "executionCoordinator/JobRunClaims", ClaimDueJob )
-			.RequireAuthorization()
+		options ??= new ExecutionCoordinatorEndpointOptions();
+
+		// The policies are the host's transport gate: they decide who may call this API at all.
+		// They are not the grant decisions, which stay in IExecutionCoordinator: it enforces them whoever the
+		// caller is, so an in-process caller is held to the same rules as one arriving here.
+		RouteGroupBuilder group = routes.MapGroup( ApiBasePaths.Normalize( options.BasePath, nameof(options.BasePath) ) );
+
+		// No policies (null or empty) means the default policy: authenticated callers only.
+		IReadOnlyList<string> policies = options.AuthorizationPolicies ?? Array.Empty<string>();
+
+		if( policies.Any( string.IsNullOrWhiteSpace ) )
+			throw new ArgumentException( "Authorization policy names must not be blank.", nameof(options) );
+
+		if( policies.Count == 0 )
+			group.RequireAuthorization();
+		else
+			group.RequireAuthorization( policies.ToArray() );
+
+		group.MapPost( "JobRunClaims", ClaimDueJob )
 			.WithName( "ClaimDueJob" )
-#if NET7_0_OR_GREATER
 			.WithTags( "ExecutionCoordinator" )
 			.WithSummary( "Claim a due job run for a worker" )
-#endif
 			.Produces<ClaimedJob>( StatusCodes.Status200OK )
 			// Nothing due is an expected outcome of a poll, not a failure.
 			.Produces( StatusCodes.Status204NoContent )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "executionCoordinator/JobRuns/{run}/leaseRenewal", RenewClaim )
-			.RequireAuthorization()
+		group.MapPost( "JobRuns/{run}/leaseRenewal", RenewClaim )
 			.WithName( "RenewJobRunClaim" )
-#if NET7_0_OR_GREATER
 			.WithTags( "ExecutionCoordinator" )
 			.WithSummary( "Extend the lease of a claimed job run" )
-#endif
 			// The body is the coordinator's own answer: false means the claim was lost and the
 			// worker must abandon the run without reporting completion. A lost claim is an
 			// expected outcome of a heartbeat, not a request failure, so it is not an error status.
@@ -55,33 +70,27 @@ public static class ExecutionCoordinatorEndpoints
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "executionCoordinator/JobRuns/{run}/abandonment", AbandonClaim )
-			.RequireAuthorization()
+		group.MapPost( "JobRuns/{run}/abandonment", AbandonClaim )
 			.WithName( "AbandonJobRunClaim" )
-#if NET7_0_OR_GREATER
 			.WithTags( "ExecutionCoordinator" )
 			.WithSummary( "Release a claimed job run so a peer can adopt it immediately" )
-#endif
 			// The body is the coordinator's own answer: false means the claim was not held (nothing
 			// was released), which is an expected outcome, not a request failure.
 			.Produces<bool>( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden );
 
-		routes.MapPost( "executionCoordinator/JobRuns/{run}/completion", ReportCompletion )
-			.RequireAuthorization()
+		group.MapPost( "JobRuns/{run}/completion", ReportCompletion )
 			.WithName( "ReportJobRunCompletion" )
-#if NET7_0_OR_GREATER
 			.WithTags( "ExecutionCoordinator" )
 			.WithSummary( "Report the terminal state of a claimed job run" )
-#endif
 			.Produces( StatusCodes.Status200OK )
 			.Produces<BadRequestResultInfo>( StatusCodes.Status400BadRequest )
 			.Produces( StatusCodes.Status403Forbidden )
 			.Produces( StatusCodes.Status404NotFound )
 			.Produces( StatusCodes.Status409Conflict );
 
-		return routes;
+		return group;
 	}
 
 	private static IResult InvalidArgument( ArgumentException exception ) =>

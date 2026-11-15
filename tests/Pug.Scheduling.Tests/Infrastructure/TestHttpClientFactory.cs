@@ -11,12 +11,14 @@ internal sealed class TestHttpClientFactory : IHttpClientFactory
 {
 	private readonly SchedulingApiFixture _fixture;
 	private readonly string? _user;
+	private readonly string? _scope;
 
-	internal TestHttpClientFactory( SchedulingApiFixture fixture, string? user )
+	internal TestHttpClientFactory( SchedulingApiFixture fixture, string? user, string? scope = null )
 	{
+		_scope = scope;
 		_fixture = fixture;
 		_user = user;
 	}
 
-	public HttpClient CreateClient( string name ) => _fixture.CreateClient( _user );
+	public HttpClient CreateClient( string name ) => _fixture.CreateClient( _user, _scope );
 }

@@ -107,13 +107,25 @@ back:
 | 409 `RunInProgressResultInfo` | `RunInProgressException` | run-now while a run is active |
 | 409 | `ClaimNotHeldException` | completion by a worker that does not hold the run |
 
-Endpoints carry their own route prefixes, so map them at the root:
+Endpoints carry their own route prefixes, so map them at the root. Each call takes optional options for
+the API's base path and authorization policies, and returns the endpoints' route group:
 
 ```csharp
 app.MapSchedulingEndpoints();            // schedules/...
 app.MapExecutionCoordinatorEndpoints();  // executionCoordinator/...   (only if workers run elsewhere)
 app.MapSchedulerWorkerEndpoints();       // workers/...                (only if workers run here)
+
+// A different base path, and a policy (registered by the host with AddAuthorization) gating the API.
+// The policy decides who may call the API at all; the facades still enforce the grants.
+app.MapSchedulingEndpoints( new SchedulingEndpointOptions
+{
+    BasePath = "api/v1/schedules",
+    AuthorizationPolicies = new[] { "scheduling-api" }
+} );
 ```
+
+`SchedulerClient` and `ExecutionCoordinatorClient` take the matching base path as an optional second argument
+(`new SchedulerClient( httpClient, "api/v1/schedules" )`); without one they use the defaults.
 
 ## Hosting a worker out-of-process
 

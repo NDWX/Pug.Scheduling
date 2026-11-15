@@ -14,6 +14,7 @@ using Pug.HttpApiClient;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.Data.Abstractions;
 using Pug.Scheduling.DependencyInjection;
+using Microsoft.AspNetCore.Authorization;
 using Pug.Scheduling.WebApi;
 using Pug.Scheduling.Worker.WebApi;
 
@@ -31,6 +32,26 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 	private readonly SqliteScheduleDatabaseFixture _scheduleDatabase = new();
 
 	private IHost _host = null!;
+
+	// How each API is mapped; null maps it with its defaults, as a host that configures nothing.
+	private readonly SchedulingEndpointOptions? _schedulingOptions;
+	private readonly ExecutionCoordinatorEndpointOptions? _coordinatorOptions;
+	private readonly SchedulerWorkerEndpointOptions? _workerOptions;
+	private readonly Action<AuthorizationOptions>? _configureAuthorization;
+
+	public SchedulingApiFixture()
+	{
+	}
+
+	// For the suites that host the APIs under a custom base path or policies.
+	internal SchedulingApiFixture( SchedulingEndpointOptions? scheduling, ExecutionCoordinatorEndpointOptions? coordinator,
+									SchedulerWorkerEndpointOptions? workers, Action<AuthorizationOptions>? configureAuthorization )
+	{
+		_schedulingOptions = scheduling;
+		_coordinatorOptions = coordinator;
+		_workerOptions = workers;
+		_configureAuthorization = configureAuthorization;
+	}
 
 	internal TestAuthorizations Authorizations { get; } = new();
 
@@ -91,7 +112,7 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 				.AddScheme<AuthenticationSchemeOptions, TestAuthenticationHandler>(
 						TestAuthenticationHandler.SchemeName, _ => { } );
 
-		services.AddAuthorization();
+		services.AddAuthorization( options => _configureAuthorization?.Invoke( options ) );
 
 		services.AddSingleton<IApplicationData<IDataSession>>( _scheduleDatabase.ApplicationData );
 
@@ -119,7 +140,7 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		services.AddSingleton<ISchedulerWorkerRegistry>( new FakeSchedulerWorkerRegistry( Worker, OtherWorker ) );
 	}
 
-	private static void Configure( IApplicationBuilder app )
+	private void Configure( IApplicationBuilder app )
 	{
 		app.UseRouting();
 		app.UseAuthentication();
@@ -130,23 +151,26 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 		app.UseEndpoints(
 				endpoints =>
 				{
-					endpoints.MapSchedulingEndpoints();
-					endpoints.MapExecutionCoordinatorEndpoints();
-					endpoints.MapSchedulerWorkerEndpoints();
+					endpoints.MapSchedulingEndpoints( _schedulingOptions );
+					endpoints.MapExecutionCoordinatorEndpoints( _coordinatorOptions );
+					endpoints.MapSchedulerWorkerEndpoints( _workerOptions );
 				}
 			);
 	}
 
 	/// <summary>
 	/// Client whose requests are authenticated as the given user; pass null for an
-	/// unauthenticated caller.
+	/// unauthenticated caller. <paramref name="scope"/> adds the <c>scope</c> claim a policy test requires.
 	/// </summary>
-	internal HttpClient CreateClient( string? user )
+	internal HttpClient CreateClient( string? user, string? scope = null )
 	{
 		HttpClient client = _host.GetTestClient();
 
 		if( user is not null )
 			client.DefaultRequestHeaders.Add( TestAuthenticationHandler.UserHeader, user );
+
+		if( scope is not null )
+			client.DefaultRequestHeaders.Add( TestAuthenticationHandler.ScopeHeader, scope );
 
 		return client;
 	}
@@ -155,8 +179,8 @@ public sealed class SchedulingApiFixture : IAsyncLifetime
 	/// <see cref="IHttpApiClient"/> over the TestServer, authenticated as the given user — what
 	/// the scheduling API clients are constructed with.
 	/// </summary>
-	internal IHttpApiClient CreateApiClient( string? user ) =>
-		new HttpApiClient.HttpApiClient( new Uri( "http://localhost/" ), new TestHttpClientFactory( this, user ) );
+	internal IHttpApiClient CreateApiClient( string? user, string? scope = null ) =>
+		new HttpApiClient.HttpApiClient( new Uri( "http://localhost/" ), new TestHttpClientFactory( this, user, scope ) );
 
 	internal static HttpContent JsonContent<T>( T value )
 	{

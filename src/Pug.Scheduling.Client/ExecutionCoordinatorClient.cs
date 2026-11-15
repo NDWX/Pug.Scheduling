@@ -20,15 +20,25 @@ namespace Pug.Scheduling.Client;
 /// </summary>
 public class ExecutionCoordinatorClient : ApiClient, IExecutionCoordinator
 {
-	private const string ClaimsPath = "executionCoordinator/JobRunClaims";
+	private readonly string _basePath;
 
-	public ExecutionCoordinatorClient( IHttpApiClient httpClient )
+	private string ClaimsPath => $"{_basePath}/JobRunClaims";
+
+	/// <param name="httpClient">Carries the worker's credentials.</param>
+	/// <param name="basePath">
+	/// Where the host mapped the coordinator endpoints
+	/// (<c>ExecutionCoordinatorEndpointOptions.BasePath</c>); leading and trailing <c>/</c> are
+	/// ignored. Throws <see cref="ArgumentException"/> when empty.
+	/// </param>
+	public ExecutionCoordinatorClient( IHttpApiClient httpClient,
+										string basePath = ApiBasePaths.ExecutionCoordinator )
 		: base( httpClient )
 	{
+		_basePath = ApiBasePaths.Normalize( basePath, nameof(basePath) );
 	}
 
-	private static string RunPath( string run, string action ) =>
-		$"executionCoordinator/JobRuns/{Uri.EscapeDataString( run )}/{action}";
+	private string RunPath( string run, string action ) =>
+		$"{_basePath}/JobRuns/{Uri.EscapeDataString( run )}/{action}";
 
 	private static Dictionary<string, string> CallerQuery( string claimant, int worker ) =>
 		new()
