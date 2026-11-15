@@ -1,0 +1,13 @@
+{
+  "name": "pug-scheduling",
+  "description": "Skills for Pug.Scheduling, the tenant-aware, database-backed job scheduler: its model, lifecycle and guarantees (at-least-once, misfire, retry, run-now), hosting the scheduler and execution coordinator, running workers in-process or remotely, writing job handlers, and managing schedules through IScheduler and SchedulerClient. Versioned with the Pug.Scheduling packages.",
+  "version": "0.0.1",
+  "author": {
+    "name": "Andrian",
+    "email": "andrian@astraliscaelum.net"
+  },
+  "homepage": "https://github.com/NDWX/Pug.Scheduling",
+  "repository": "https://github.com/NDWX/Pug.Scheduling",
+  "license": "Apache-2.0+",
+  "keywords": ["pug", "scheduling", "scheduler", "jobs", "cron", "worker", "dotnet"]
+}

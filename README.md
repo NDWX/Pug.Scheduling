@@ -75,7 +75,8 @@ services.AddJobPayloadValidator<ReportPayloadValidator>( "report" ); // optional
 
 services.AddSchedulingWorkers( new WorkerOptions { Workers = 4 } );   // omit where jobs execute elsewhere
 // WorkerOptions also sets Claimant, JobType, PollInterval, HeartbeatInterval,
-// CancellationGrace (default 10 s) and MaxDetachedHandlers (default 2).
+// CancellationGrace (default 10 s), MaxDetachedHandlers (default 2) and
+// AbandonTimeout (default 5 s).
 ```
 
 The store exposes `GetSchemaUpgradeScripts()`; run them in the order given (schema version, then
@@ -94,7 +95,13 @@ server) shortens every live lease by the size of the step, so `LeaseDuration` mu
 
 **SQLite host requirements.** Enable WAL journal mode (`PRAGMA journal_mode = WAL`) and a busy
 timeout: units of work run as real transactions (a write begins `IMMEDIATE`), and under WAL readers
-do not block the writer. Apply the schema scripts in group order, as above.
+do not block the writer. Set the busy timeout in the connection string with Microsoft.Data.Sqlite's
+`Default Timeout` keyword (seconds), e.g. `Data Source=app.db;Default Timeout=5`; a
+`PRAGMA busy_timeout` run on another connection does not apply to the store's connections. Apply the
+schema scripts in group order, as above.
+
+Microsoft.Data.Sqlite 10.0.0 pulls in SQLitePCLRaw 2.1.11, which carries a vulnerability advisory
+(NU1903). Reference `SQLitePCLRaw.bundle_e_sqlite3` 3.0.3 or later in the host, as the tests do.
 
 **Status codes.** The facades' exceptions map to the endpoints' responses, and the clients map them
 back:

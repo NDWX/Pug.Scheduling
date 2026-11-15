@@ -10,8 +10,8 @@ namespace Pug.Scheduling.Models
 		// The run's timeout elapsed before the handler completed.
 		public const string TimedOut = "TIMED_OUT";
 
-		// The run was declined without executing (e.g. misfire SKIP handling or a tenant quota),
-		// with the reason recorded in Detail.
+		// The run was declined without executing because of the misfire SKIP handling: the
+		// occurrence was missed and passed over.
 		public const string Skipped = "SKIPPED";
 	}
 }

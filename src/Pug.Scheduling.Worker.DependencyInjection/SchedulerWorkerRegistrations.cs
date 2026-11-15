@@ -39,7 +39,8 @@ namespace Pug.Scheduling.Worker.DependencyInjection
 			IScheduledJobHandlerFactoryRegistry handlerFactories =
 				provider.GetRequiredService<IScheduledJobHandlerFactoryRegistry>();
 
-			// The host's clock when it registers one (as AddScheduling uses it), else the system's.
+			// The host's TimeProvider when it registers one, else the system's. Used for the workers'
+			// LastPoll only; AddScheduling's decisions use ISchedulingClock and ignore a TimeProvider.
 			TimeProvider timeProvider = provider.GetService<TimeProvider>() ?? TimeProvider.System;
 
 			ILogger<SchedulerWorker> logger = provider.GetRequiredService<ILogger<SchedulerWorker>>();

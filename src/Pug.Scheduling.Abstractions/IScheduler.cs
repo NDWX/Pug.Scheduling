@@ -45,8 +45,9 @@ namespace Pug.Scheduling.Abstractions
 		// schedule's LastUpdate. Throws UnknownScheduleException when the schedule does not exist.
 		Task UpdateDefinitionAsync( string identifier, ScheduleDefinition definition );
 
-		// Deletes the schedule and its run history. A run currently executing is not interrupted,
-		// but its completion is recorded nowhere. Throws UnknownScheduleException when the
+		// Deletes the schedule and its run history. A run currently executing is not interrupted
+		// directly, but the worker's next lease renewal is refused, so the worker cancels the
+		// handler as a lost claim and the run's completion fails with UnknownRunException. Throws UnknownScheduleException when the
 		// schedule does not exist.
 		Task DeleteAsync( string identifier );
 
@@ -55,8 +56,9 @@ namespace Pug.Scheduling.Abstractions
 		// completion. Throws UnknownScheduleException when the schedule does not exist.
 		Task PauseAsync( string identifier );
 
-		// Lifts a pause and recomputes the next occurrence, applying the misfire policy to
-		// occurrences elapsed while paused. Throws UnknownScheduleException when the schedule
+		// Lifts a pause. Only the pause flag is cleared; the next occurrence is not
+		// recomputed, so the misfire policy applies at the next claim to occurrences elapsed
+		// while paused. Throws UnknownScheduleException when the schedule
 		// does not exist.
 		Task ResumeAsync( string identifier );
 

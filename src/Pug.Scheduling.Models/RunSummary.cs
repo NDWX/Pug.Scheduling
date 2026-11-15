@@ -20,7 +20,8 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Null while the run is still executing.
+		// ScheduleState.LastRun is written only when a run completes or is skipped, so it never
+		// reflects a run in progress.
 		[DataMember]
 		public DateTime? Finished
 		{
@@ -32,7 +33,7 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Well-known RunResults value; null while the run is still executing.
+		// Well-known RunResults value.
 		[DataMember]
 		public string Result
 		{
