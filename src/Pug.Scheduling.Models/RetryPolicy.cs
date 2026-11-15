@@ -22,7 +22,7 @@ namespace Pug.Scheduling.Models
 		}
 
 		// Base delay before the first retry; subsequent retries back off exponentially
-		// (Backoff * 2^attempt).
+		// (Backoff * 2^(retry - 1), counted from the failed run's completion).
 		[Required, DataMember( IsRequired = true )]
 		public TimeSpan Backoff
 		{

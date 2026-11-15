@@ -50,7 +50,9 @@ namespace Pug.Scheduling.Worker
 		/// <see cref="Claimant"/> is neither blank nor contains '/', <see cref="Workers"/> is at
 		/// least 1, <see cref="JobType"/> is null or not blank, <see cref="PollInterval"/> and
 		/// <see cref="HeartbeatInterval"/> are positive, <see cref="CancellationGrace"/> is not
-		/// negative, each of the three is within <see cref="TimerBounds.Maximum"/>, and
+		/// negative, <see cref="AbandonTimeout"/> is positive, each of <see cref="AbandonTimeout"/>,
+		/// <see cref="PollInterval"/>, <see cref="HeartbeatInterval"/> and
+		/// <see cref="CancellationGrace"/> is within <see cref="TimerBounds.Maximum"/>, and
 		/// <see cref="MaxDetachedHandlers"/> is at least 1.
 		/// </summary>
 		public void Validate()

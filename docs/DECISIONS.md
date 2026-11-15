@@ -192,8 +192,9 @@ Deletes are explicit (runs then schedule) rather than relying on FK cascade enfo
 **Amended (#10, sub-phase C):** `RecurrenceCalculator` exposes `GetFirstOccurrence( r, now )` and
 `GetNextOccurrence( r, previous, after )`. Cron: the next occurrence strictly after `after`.
 Interval: `previous + k·I` for the smallest `k >= 1` landing after `after`, so the grid keeps its
-phase instead of drifting. First occurrence: `NotBefore` when it is in the future (it anchors an
-interval's grid), otherwise `now + I` (previously `NotBefore + I`). `NotBefore`/`NotAfter` clamp
+phase instead of drifting. First occurrence of an interval: with `NotBefore` set, the smallest `NotBefore + k·I`
+(`k >= 0`) at or after `now` (`NotBefore` anchors the grid); without it, `now + I` (previously
+`NotBefore + I`). `NotBefore`/`NotAfter` clamp
 every result. Registration and a recurrence change use `GetFirstOccurrence`, but a definition update
 changes `nextRun` only when the schedule is idle (`attempt = 0`, no run active) and the recurrence
 changed; during a run it leaves `nextRun` alone and the completion applies the new recurrence

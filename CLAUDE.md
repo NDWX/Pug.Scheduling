@@ -32,7 +32,7 @@ Without Docker, `--filter "Category!=Postgres"` runs the rest.
 | `Pug.Scheduling.WebApi.Models` | Every HTTP surface contract — `BadRequestResultInfo`, `RunInProgressResultInfo` (the 409 body of a refused run-now), `JobRunClaimRequest`, `JobRunCompletion`, `ApiBasePaths` (default base paths and their normalization, shared by servers and clients). Referenced by `.WebApi` and `.Client` projects; carries no ASP.NET dependency. |
 | `Pug.Scheduling.WebApi` | `MapSchedulingEndpoints()` (`schedules/…`) and `MapExecutionCoordinatorEndpoints()` (`executionCoordinator/…` — claims, `leaseRenewal`, `abandonment`, `completion` — the out-of-process worker transport; operations `CLAIM_JOBS`, `RENEW_CLAIM`, `ABANDON_CLAIM`, `REPORT_COMPLETION`). Each extension carries its own route prefix — the host's routes are not the scheduler's alone. Each takes optional `SchedulingEndpointOptions` / `ExecutionCoordinatorEndpointOptions` (`BasePath`, `AuthorizationPolicies`; D28), maps under a `RouteGroupBuilder` it returns, and applies the policy (default: authenticated) once on the group. Targets `net8.0;net10.0` (`MapGroup`); references only Abstractions/Models. |
 | `Pug.Scheduling.Worker.WebApi` | `MapSchedulerWorkerEndpoints()` (`workers`, `workers/{worker}`, `workers/{worker}/pause|resume`; the list shows only workers whose claimant the caller may view); takes `SchedulerWorkerEndpointOptions` likewise. Targets `net8.0;net10.0`. Its own package so an out-of-process worker host references nothing it does not need. |
-| `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes (optional `basePath`, default from `ApiBasePaths`; D28); reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions only — a worker host must not pull in ASP.NET. |
+| `Pug.Scheduling.Client` | `SchedulerClient` / `ExecutionCoordinatorClient` over the 1e routes (optional `basePath`, default from `ApiBasePaths`; D28); reproduces the facades' exceptions so callers cannot tell local from remote. References Abstractions, WebApi.Models, `Pug.HttpApiClient` and `Pug.Application.Security.Abstractions` — a worker host must not pull in ASP.NET. |
 | `Pug.Scheduling.DependencyInjection` | `AddScheduling` (also `TryAddSingleton<ISchedulingClock, DatabaseClock>`: a host's own `ISchedulingClock` wins, a registered `TimeProvider` does not), `AddJobPayloadValidator<T>`, `AddSchedulableJobType`. |
 
 ## Domain invariants (do not regress)
@@ -103,7 +103,7 @@ the domain layer begins or commits a transaction. **SQLite enlists itself** (the
 Microsoft.Data.Sqlite ignores `TransactionScope`, so its `DapperData` enlists every session created in
 a scope. A write unit begins `IMMEDIATE`, taking the write lock up front, and a read unit begins
 deferred; both commit in phase one. Postgres must not copy this: Npgsql enlists natively. SQL lives once in `DapperDataSessionBase`; a provider overrides only dialect hooks (never regenerate a provider by `sed`). Hosts on SQLite need WAL mode and must apply `GetSchemaUpgradeScripts()` in group order.
-Contracts multi-target `net6.0;net8.0;net10.0`,
+Contracts multi-target `net6.0;net8.0;net10.0` (the two `.WebApi` packages are `net8.0;net10.0`, D28),
 implementations `net10.0`; the two API packages (`.WebApi`, `.Worker.WebApi`) `net8.0;net10.0`. Tests: xUnit, per-fixture databases migrated by DbUp from
 `GetSchemaUpgradeScripts()`; Moq only for `ISecurityManager`. Store-backed suites are abstract
 generics over `IScheduleDatabaseFixture` with a `Sqlite…` and a

@@ -23,8 +23,9 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 	{
 		_dbPath = Path.Combine( Path.GetTempPath(), $"pug_scheduling_schedule_test_{Guid.NewGuid():N}.db" );
 
-		// Pooling=False ensures each connection is physically closed when disposed.
-		string connectionString = $"Data Source={_dbPath};Pooling=False;";
+		// Pooling=False ensures each connection is physically closed when disposed. Default Timeout
+		// (seconds) is the busy timeout of every connection; a PRAGMA would only reach one.
+		string connectionString = $"Data Source={_dbPath};Pooling=False;Default Timeout=5;";
 
 		_connectionString = connectionString;
 
@@ -62,8 +63,6 @@ public sealed class SqliteScheduleDatabaseFixture : IScheduleDatabaseFixture, IA
 		connection.Open();
 		using SqliteCommand cmd = connection.CreateCommand();
 		cmd.CommandText = "PRAGMA journal_mode=WAL;";
-		cmd.ExecuteNonQuery();
-		cmd.CommandText = "PRAGMA busy_timeout=5000;";
 		cmd.ExecuteNonQuery();
 	}
 
