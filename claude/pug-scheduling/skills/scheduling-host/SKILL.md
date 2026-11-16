@@ -118,7 +118,7 @@ These defaults are copied into each definition and stored with it. Every schedul
 
 | Option | Default | Notes |
 |---|---|---|
-| `LeaseDuration` | 2 min | Validity of a claim, renewed by each worker heartbeat. Must comfortably exceed every worker's `HeartbeatInterval` (default 30 s) plus any forward step of the clock. Not validated |
+| `LeaseDuration` | 2 min | Validity of a claim, renewed by each worker heartbeat; handed to workers as `ClaimedJob.ClaimDuration`, which they time their claims by (heartbeats capped at a third of it, less 0.5 s). Must comfortably exceed the workers' renewal round trip plus any forward step of the clock. **The same on every coordinator instance over one store**: a renewal restarts the full duration the worker was handed. From `ExecutionCoordinatorOptions.MinimumLeaseDuration` (10 s) to `TimerBounds.Maximum`, or the coordinator throws `ArgumentException` when first resolved |
 | `ClaimCandidates` | 10 | Due schedules read per claim; a claim takes the first it can lock. Below 1, the coordinator throws `ArgumentException` when first resolved |
 
 **Job types.** A definition whose `JobType` is not registered here is refused with `ArgumentException` (400). Registering a handler (`AddScheduledJobHandler<T>`) does **not** make a type schedulable. A host that accepts schedules for a type calls `AddSchedulableJobType( type )` or `AddJobPayloadValidator<T>( type )`, wherever the type executes.
@@ -231,7 +231,7 @@ Every time the facades decide on or record is read from **`ISchedulingClock`** i
 - **`DatabaseClock`** (the default `AddScheduling` registers) reads the database's time: Postgres `clock_timestamp()`; SQLite `strftime( …, 'now' )`, which is the SQLite host's own clock. On Postgres, every coordinator host judges leases by one clock, so skew between hosts does not matter.
 - **`TimeProviderClock( TimeProvider )`** is opt-in, for tests (with a fake `TimeProvider`) and single-host deployments. Register it as `ISchedulingClock`, before or after `AddScheduling`. With several hosts, each judges leases by its own clock: a host whose clock runs ahead treats live leases as lapsed and adopts runs that are still executing. `LeaseDuration` must then exceed the skew.
 - **A registered `TimeProvider` is ignored by the facades.** Only an `ISchedulingClock` registration changes their clock. Workers use a registered `TimeProvider` only to stamp `WorkerInfo.LastPoll`.
-- **Forward jumps:** on any clock, a forward step (an NTP correction on the database server, say) shortens every live lease by the size of the step. Keep `LeaseDuration` comfortably above `HeartbeatInterval` plus any step you expect.
+- **Forward jumps:** on any clock, a forward step (an NTP correction on the database server, say) shortens every live lease by the size of the step. Workers time their claims on their own clocks with only a 0.5 s tolerance, so keep `LeaseDuration` comfortably above a renewal's round trip plus any step you expect.
 
 ## Topologies
 
@@ -256,7 +256,9 @@ These combine: several scheduler or coordinator hosts on one Postgres store are 
 - **Authorizing on the operation alone.** `GET_INFO`, `PAUSE` and `RESUME` are both schedule and worker operations. Match on the resource type as well.
 - **Expecting a `TimeProvider` registration to move the facades' clock.** It doesn't; register `ISchedulingClock`.
 - **`TimeProviderClock` on several hosts.** Skew adopts live runs. Keep `DatabaseClock` unless there is one host.
-- **`LeaseDuration` shorter than the heartbeat plus a margin.** Leases lapse mid-run and a peer re-executes the occurrence. Remote workers' `HeartbeatInterval` is set in their hosts, so agree it with them.
+- **A `LeaseDuration` too short for the workers' network.** Workers renew at least three times per window (`HeartbeatInterval`, capped at a third of the lease less 0.5 s) and give up a claim no renewal confirmed within it, so a lease near the 10 s minimum loses claims to two slow renewals, and the occurrence is executed again.
+- **Coordinator calls without finite timeouts.** Workers do not bound a single completion report, so a coordinator call that hangs holds its worker. Keep the store's timeouts finite (Npgsql's command timeout, 30 s by default; SQLite's busy timeout) and, for remote workers, the transport's (HttpClient, 100 s by default).
+- **Upgrading worker hosts first.** A coordinator older than the worker may send no `ClaimDuration`, which a new worker reads as zero: it fails every run it claims without executing it. Upgrade the scheduler hosts first.
 - **Endpoints without authentication.** Map them only in a host with `AddAuthentication` / `AddAuthorization` and `UseAuthentication()` / `UseAuthorization()`. They refuse with `Results.Forbid()`, which needs an authentication scheme.
 - **Mismatched base paths.** A client built with a base path other than the host's mapping gets 404 on every call.
 - **Scoped services in a payload validator.** Validators are keyed singletons. Create a scope inside the validator if it needs scoped services.

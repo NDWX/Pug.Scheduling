@@ -80,16 +80,19 @@ builder.Build().Run();
 
 | Operation | Used for | Without it |
 |---|---|---|
-| `CLAIM_JOBS` | every poll | each poll fails (logged at Error) and the worker claims nothing |
-| `RENEW_CLAIM` | every heartbeat | renewals fail (logged at Warning) but the handler is **never cancelled**: the lease lapses mid-run, and a peer adopts and **re-executes** the run while it is still running (issue #35) |
-| `REPORT_COMPLETION` | reporting the outcome | the report fails (logged at Error). The worker polls again at once, is still the run's holder, and adopts its own run straight away: a **tight re-execution loop** that never uses up an attempt |
-| `ABANDON_CLAIM` | releasing the claim on shutdown | the release is refused (logged at Warning) and the run waits out its lease before a peer adopts it |
+| `CLAIM_JOBS` | every poll | each poll is refused (logged at Error, naming the grant) and the worker claims nothing. It keeps polling and recovers by itself once granted |
+| `RENEW_CLAIM` | every heartbeat | the first renewal is refused: the worker cancels the handler, reports nothing, releases the claim and **pauses itself** with fault `RENEWAL_REFUSED` |
+| `REPORT_COMPLETION` | reporting the outcome | the report is refused: the outcome is dropped, the worker releases the claim and **pauses itself** with fault `COMPLETION_REFUSED`. The run was executed once |
+| `ABANDON_CLAIM` | releasing the claim (shutdown, or after a refusal) | the release is refused (logged at Warning) and the run waits out its lease before a peer adopts it |
 
-**Alert on these log lines**, since the worker keeps going after each:
-- `Worker {Claimant}/{Worker} failed to report completion of run {Run} of schedule {Schedule}.` (Error)
-- `Worker {Claimant}/{Worker} failed to renew claim of run {Run}; will retry.` (Warning, repeated every beat)
+**A refusal (403, `NotAuthorized`) is the only failure that pauses a worker**, and only on a renewal or a completion, where carrying on would execute work the worker can neither keep nor record. The fault shows in `WorkerInfo.Fault` (`WorkerFaults`), and an Error names the missing grant. To recover: grant the operation on the claimant, then **resume the worker** (`POST workers/{worker}/resume` or `ISchedulerWorker.Resume()`), which clears the fault. The released run is then adopted and executed again (at-least-once). A detached handler's claim is not released (it is still running); it lapses with its lease.
 
-A grant revoked mid-run, or credentials that expire mid-run (401), behave the same as a missing grant: renewals keep failing, the handler is never cancelled, and the run is re-executed elsewhere (issue #35).
+Every other failure is retried, never paused on: 401 (a token may refresh), 5xx, network errors, timeouts, 400. A renewal that keeps failing for the whole lease loses the claim (the handler is cancelled, nothing is reported); a report that keeps failing until the lease runs out is dropped, and the run is executed again.
+
+**Alert on these log lines:**
+- `Worker {Claimant}/{Worker} (job type {JobType}) paused itself with fault {Fault}: …` (Error): a grant is missing; the worker is idle until resumed.
+- `Worker {Claimant}/{Worker} could not report completion of run {Run} of schedule {Schedule} before …` (Error): an outcome was dropped.
+- `Worker {Claimant}/{Worker} (job type {JobType}) was refused a claim: …` (Error, every poll).
 
 The claimant is part of the grant, so a group whose claimant changes per instance needs grants that cover every claimant it may use. An **in-process** worker running with no principal is not checked at all (`scheduling-host`, "Security").
 
@@ -102,18 +105,22 @@ Validated by `WorkerOptions.Validate()`, at `AddSchedulingWorkers` and again by 
 | `Claimant` | `Environment.MachineName` | not blank, no `/` | The group's identity: the coordinator grants are qualified by it, and the lease holder is `claimant/number` |
 | `Workers` | 1 | ≥ 1 | Workers in the group |
 | `JobType` | null (any type) | null or not blank | The only job type the group claims |
-| `PollInterval` | 10 s | > 0, ≤ max | Wait after a poll that claimed nothing. After a run, the worker polls again at once |
-| `HeartbeatInterval` | 30 s | > 0, ≤ max | Claim renewal cadence while a run is attended. Keep it well under the coordinator's `LeaseDuration` (default 2 min) |
+| `PollInterval` | 10 s | > 0, ≤ max | Wait after a poll that claimed nothing, and between retries of a completion report that did not get through. After a run, the worker polls again at once |
+| `HeartbeatInterval` | 30 s | > 0, ≤ max | Claim renewal cadence while a run is attended. Capped at a third of the claim's window (`ClaimDuration` − 0.5 s), so even a failed renewal leaves a retry within the lease |
 | `CancellationGrace` | 10 s | ≥ 0, ≤ max | How long a cancelled handler gets to stop before it is detached. Zero detaches at once |
 | `MaxDetachedHandlers` | 2 | ≥ 1 | Detached handlers a worker tolerates before it stops claiming |
-| `AbandonTimeout` | 5 s | > 0, ≤ max | Bound on releasing the claim during a graceful shutdown |
+| `AbandonTimeout` | 5 s | > 0, ≤ max | Bound on releasing the claim (graceful shutdown, or after a refused renewal or report) |
 
 ## Timeouts, heartbeat and lease
 
 - **The run's timeout** is the schedule's (`ClaimedJob.Timeout`; `SchedulerOptions.DefaultTimeout`, 10 min, when the definition sets none). The worker enforces it and passes it to the handler. A timeout outside `0..TimerBounds.Maximum` (from a misbehaving remote coordinator) fails the run without starting the handler.
-- **The lease is independent of the timeout.** A claim is valid for `LeaseDuration` (server side, default 2 min), and every `HeartbeatInterval` the worker renews it, from the first interval after the claim until the run is reported or detached. A three-hour job holds a two-minute lease by heartbeats.
-  - A renewal that **fails** (network error, 401, 403) is logged and retried at the next beat. The handler keeps running, even when the failure is permanent (issue #35).
-  - A renewal answered **false** means the claim is lost: a peer adopted the run, or the schedule was deleted. The worker cancels the handler and abandons the run **without reporting**, even if the handler then finishes cleanly.
+- **The lease is independent of the timeout.** A claim is valid for `LeaseDuration` (server side, default 2 min), handed to the worker as `ClaimedJob.ClaimDuration`. The worker renews it every `HeartbeatInterval` (capped as above), from the first beat after the claim until the run is reported or detached. A three-hour job holds a two-minute lease by heartbeats.
+- **The worker times the claim itself.** Its deadline is the moment it sent the claim (or the last confirmed renewal) plus `ClaimDuration`, less a 0.5 s tolerance (`SchedulerWorker.LeaseTolerance`), on its own monotonic clock, so it gives up before the coordinator could hand the run to a peer. A claim whose `ClaimDuration` is under 1 s (`SchedulerWorker.MinimumClaimDuration`; the coordinator itself requires 10 s) fails the run without starting the handler.
+  - A renewal that **fails** (network error, 401, 5xx, timeout) is logged at Warning and retried at the next beat. If no renewal is confirmed before the deadline, the claim is **lost**. A hung renewal is waited on only until the deadline.
+  - A renewal answered **false** means the claim is lost: a peer adopted the run, or the schedule was deleted.
+  - A renewal **refused** (403) loses the claim and faults the worker (above).
+  - On a lost claim the worker cancels the handler and abandons the run **without reporting**, even if the handler then finishes cleanly.
+- **Reporting.** The worker does not claim again until the report is settled: recorded; dropped because the claim is no longer held; refused (fault, above); or failing until the deadline, retried every `PollInterval` meanwhile, then dropped. The host stopping ends the retries at once. After any report that was not recorded (and after an abandoned run), the worker waits `PollInterval` before claiming again: the run may still be its own, and an immediate claim would adopt it straight back. After a recorded report it polls at once.
 - **When a run stops**, the worker cancels the handler's token and waits `CancellationGrace`. A run stops on its timeout, a lost claim or the host stopping. What is reported:
 
 | The handler… | Reported |
@@ -145,7 +152,7 @@ When the host stops a worker that is attending a run, its handler is cancelled a
 - **The handler stopped by throwing on cancellation:** the run is abandoned without a report, and the worker **releases the claim** (`AbandonClaimAsync`, needs `ABANDON_CLAIM`). The release is bounded by `AbandonTimeout`, best effort, and never throws. A peer, or this host after a restart, adopts the run at its next poll instead of waiting out the lease, and executes the occurrence again.
 - **The handler is still running:** it is detached and **nothing is released**, because a peer must not adopt a run that is still executing. Its lease lapses on its own, within `LeaseDuration`.
 
-**The shutdown budget.** One worker may take up to `CancellationGrace + AbandonTimeout` (15 s by default) to stop. Keep that below the host's `HostOptions.ShutdownTimeout` (30 s by default).
+**The shutdown budget.** One worker may take up to `CancellationGrace + AbandonTimeout` (15 s by default) to stop, plus a completion report already in flight (bounded only by the coordinator transport's timeout) and, after a refused report, the release that follows it (`AbandonTimeout` again). Keep that below the host's `HostOptions.ShutdownTimeout` (30 s by default). Retries of a report that is not getting through stop at once; the outcome is dropped and the claim is left to lapse.
 
 By default the generic host stops hosted services **one after another** (`HostOptions.ServicesStopConcurrently` is false):
 
@@ -196,12 +203,13 @@ app.MapSchedulerWorkerEndpoints( new SchedulerWorkerEndpointOptions { BasePath =
 |---|---|
 | `Claimant`, `Worker` | Identity: the group's claimant and the host-wide number |
 | `JobType` | The group's filter; null for any type |
-| `Paused` | Whether claiming is paused |
+| `Paused` | Whether claiming is paused, by an operator or by the worker itself |
+| `Fault` | Why the worker paused itself (`RENEWAL_REFUSED`, `COMPLETION_REFUSED`); null otherwise. Cleared by resume |
 | `LastPoll` | UTC time of the last poll, null before the first. Informational |
 | `ActiveJobs` | Runs being attended: 0 or 1 |
 | `DetachedJobs` | Detached handlers still running. At `MaxDetachedHandlers` the worker is not claiming |
 
-- **Pause** stops new claims; a run in progress continues to completion. It is held **in memory**: a restarted process starts unpaused. To stop a schedule rather than a worker, pause the schedule (`scheduling-api`).
+- **Pause** stops new claims; a run in progress continues to completion. It is held **in memory**: a restarted process starts unpaused, without a fault. **Resume** also clears a fault; an operator's pause sets none. To stop a schedule rather than a worker, pause the schedule (`scheduling-api`).
 - **In code:** `ISchedulerWorkerRegistry` (`Workers`, `Find( number )`) gives each `ISchedulerWorker` (`GetInfo()`, `Pause()`, `Resume()`). It performs no authorization of its own.
 - There is no management client: call the routes with any HTTP client.
 
@@ -209,9 +217,12 @@ app.MapSchedulerWorkerEndpoints( new SchedulerWorkerEndpointOptions { BasePath =
 
 - **`AddHostedService` for workers.** It keeps only the first. `AddSchedulingWorkers` registers each worker correctly.
 - **An any-type group (`JobType` null) in a host that lacks some handlers.** It claims runs it cannot execute, which fail and use up their retries. Give such hosts `JobType` groups for the types they handle.
-- **Missing, revoked or expired coordinator credentials for a remote group.** Without `RENEW_CLAIM` a long run is executed twice (issue #35); without `REPORT_COMPLETION` it is executed in a tight loop. Grant all four operations on each claimant, and alert on "failed to report completion" and "failed to renew claim".
+- **Missing or revoked coordinator grants for a remote group.** Without `REPORT_COMPLETION` the worker pauses itself at its first run; without `RENEW_CLAIM`, at its first run that lasts longer than a beat (shorter runs finish unrenewed). It stays paused until resumed, even after the grant lands. Grant all four operations on each claimant, and alert on "paused itself with fault".
+- **Resuming a faulted worker before granting.** It executes one more run and faults again.
 - **Two processes sharing a claimant,** for example two services on one machine using the default. They adopt each other's live runs.
-- **`HeartbeatInterval` too close to `LeaseDuration`.** One slow renewal lets a peer adopt the run while it still executes. The lease is configured in the scheduler host; agree on both.
+- **A `LeaseDuration` too short for the network.** The worker caps its beat at a third of its window, but renewals must still get through within the lease; near the 10 s minimum, two slow renewals lose the claim. Keep the scheduler host's `LeaseDuration` well above the worker's round trip.
+- **Upgrading worker hosts before the scheduler hosts.** An older coordinator sends no `ClaimDuration`; the worker reads it as zero and fails every run it claims, unexecuted. Upgrade the scheduler first.
+- **A coordinator transport without a timeout.** A single completion report is not bounded by the worker; it waits as long as the transport does (HttpClient's default is 100 s). Never set an infinite timeout on the worker's `HttpClient`.
 - **A shutdown budget that ignores sequential stopping.** Several workers stopping one by one overrun `ShutdownTimeout`, and their claims lapse instead of being released. Set `ServicesStopConcurrently = true`.
 - **Handlers that ignore cancellation.** They are detached, may overlap their own retry, and at `MaxDetachedHandlers` the worker stops claiming.
 - **An `ISecurityManager` that returns a principal for background work in an in-process host.** The worker is then checked like a remote one, and every claim fails until that principal holds the coordinator grants.

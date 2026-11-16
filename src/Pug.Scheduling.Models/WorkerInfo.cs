@@ -48,8 +48,22 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
+		// Whether the worker is not claiming: paused by an operator, or by itself on a Fault.
 		[Required, DataMember( IsRequired = true )]
 		public bool Paused
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// Why the worker paused itself (a WorkerFaults value); null when it did not. Set together
+		// with Paused, and cleared only by resuming the worker: an operator's pause sets none.
+		[DataMember]
+		public string Fault
 		{
 			get;
 #if NET5_0_OR_GREATER

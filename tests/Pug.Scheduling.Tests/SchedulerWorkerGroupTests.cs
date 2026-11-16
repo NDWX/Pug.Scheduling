@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using Pug.Application.Security;
 using Pug.Scheduling.Data.Abstractions;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
@@ -41,6 +42,27 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 
 		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome ) =>
 			Task.CompletedTask;
+	}
+
+	// The real coordinator, refusing completion reports while RefusesCompletion is set, as one
+	// whose worker lacks REPORT_COMPLETION would.
+	private sealed class CompletionRefusingCoordinator( IExecutionCoordinator inner ) : IExecutionCoordinator
+	{
+		public volatile bool RefusesCompletion = true;
+
+		public Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string? jobType ) =>
+			inner.ClaimDueJobAsync( claimant, worker, jobType! );
+
+		public Task<bool> RenewClaimAsync( string run, string claimant, int worker ) =>
+			inner.RenewClaimAsync( run, claimant, worker );
+
+		public Task<bool> AbandonClaimAsync( string run, string claimant, int worker ) =>
+			inner.AbandonClaimAsync( run, claimant, worker );
+
+		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome ) =>
+			RefusesCompletion
+				? Task.FromException( new NotAuthorized() )
+				: inner.ReportCompletionAsync( run, claimant, worker, result, outcome );
 	}
 
 	private static readonly TimeSpan FastPoll = TimeSpan.FromMilliseconds( 25 );
@@ -321,21 +343,90 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 		Assert.Empty( await GetRunsAsync( other ) );
 	}
 
-	// A host over the real coordinator, reached in-process (no principal ⇒ no grants needed). A
-	// null job type serves the handler for every type.
-	private IHost BuildHost( string? handlerJobType, DelegateJobHandler handler, WorkerOptions options ) =>
+	[Fact]
+	public async Task ARefusedCompletionPausesTheWorkerAndTheSameRunIsCompletedAfterResume()
+	{
+		string jobType = $"refused-{Guid.NewGuid():N}";
+
+		string schedule = await InsertDueScheduleAsync( jobType );
+
+		int executions = 0;
+
+		DelegateJobHandler handler = new(
+				( _, _, _ ) =>
+				{
+					Interlocked.Increment( ref executions );
+
+					return Task.FromResult( new JobOutcome { Successful = true } );
+				} );
+
+		CompletionRefusingCoordinator coordinator = new( NewCoordinator() );
+
+		using IHost host = BuildHost(
+				jobType, handler,
+				new WorkerOptions { Claimant = "refused", JobType = jobType, PollInterval = FastPoll },
+				coordinator );
+
+		ISchedulerWorker worker = Assert.Single( host.Services.GetRequiredService<ISchedulerWorkerRegistry>().Workers );
+
+		await host.StartAsync();
+
+		try
+		{
+			await WaitForAsync( () => Task.FromResult( worker.GetInfo().Fault is not null ) );
+
+			// Several polls' worth: a worker still polling would adopt and execute its run again.
+			await Task.Delay( FastPoll * 10 );
+
+			Assert.True( worker.GetInfo().Paused );
+			Assert.Equal( WorkerFaults.CompletionRefused, worker.GetInfo().Fault );
+			Assert.Equal( 1, executions );
+
+			ScheduleRun pending = Assert.Single( await GetRunsAsync( schedule ) );
+
+			Assert.Null( pending.Finished );
+			Assert.Equal( 0, pending.Attempt );
+
+			// The grant lands; the operator resumes. The released run is adopted, not duplicated.
+			coordinator.RefusesCompletion = false;
+
+			worker.Resume();
+
+			await WaitForAsync( async () => ( await GetRunsAsync( schedule ) ).Any( run => run.Finished is not null ) );
+
+			ScheduleRun completed = Assert.Single( await GetRunsAsync( schedule ) );
+
+			Assert.Equal( pending.Identifier, completed.Identifier );
+			Assert.Equal( RunResults.Succeeded, completed.Result );
+			Assert.Equal( 0, completed.Attempt );
+			Assert.Equal( 2, executions );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await host.StopAsync();
+		}
+	}
+
+	// The real coordinator, reached in-process (no principal ⇒ no grants needed).
+	private ExecutionCoordinator NewCoordinator() =>
+		new(
+				new SequentialIdGenerator( $"run-{Guid.NewGuid():N}" ),
+				_scheduleDatabase.ApplicationData,
+				SecurityManagerFactory.CreateWithoutPrincipal(),
+				new ExecutionCoordinatorOptions(),
+				new TimeProviderClock( TimeProvider.System ),
+				NullLogger<ExecutionCoordinator>.Instance );
+
+	// A host over the given coordinator, or the real one. A null job type serves the handler for
+	// every type.
+	private IHost BuildHost( string? handlerJobType, DelegateJobHandler handler, WorkerOptions options,
+							IExecutionCoordinator? coordinator = null ) =>
 		new HostBuilder()
 			.ConfigureServices(
 					services =>
 					{
-						services.AddSingleton<IExecutionCoordinator>(
-								new ExecutionCoordinator(
-										new SequentialIdGenerator( $"run-{Guid.NewGuid():N}" ),
-										_scheduleDatabase.ApplicationData,
-										SecurityManagerFactory.CreateWithoutPrincipal(),
-										new ExecutionCoordinatorOptions(),
-										new TimeProviderClock( TimeProvider.System ),
-										NullLogger<ExecutionCoordinator>.Instance ) );
+						services.AddSingleton( coordinator ?? NewCoordinator() );
 
 						DelegateJobHandlerFactory factory = new( _ => handler );
 

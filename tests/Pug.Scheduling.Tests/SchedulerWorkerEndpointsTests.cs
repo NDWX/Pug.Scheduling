@@ -187,6 +187,40 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
+	public async Task AFaultIsReportedAndClearedByResume()
+	{
+		const string operatorUser = "fault-operator";
+
+		Grant( operatorUser, WorkerSecurityOperations.GetInfo, SchedulingApiFixture.WorkerClaimant );
+		Grant( operatorUser, WorkerSecurityOperations.Resume, SchedulingApiFixture.WorkerClaimant );
+
+		using HttpClient client = _fixture.CreateClient( operatorUser );
+
+		_fixture.Worker.Fault( WorkerFaults.CompletionRefused );
+
+		try
+		{
+			WorkerInfo faulted = await SchedulingApiFixture.ReadAsync<WorkerInfo>( await client.GetAsync( "/workers/1" ) );
+
+			Assert.True( faulted.Paused );
+			Assert.Equal( WorkerFaults.CompletionRefused, faulted.Fault );
+
+			HttpResponseMessage resumed = await client.PostAsync( "/workers/1/resume", null );
+
+			Assert.Equal( HttpStatusCode.OK, resumed.StatusCode );
+
+			WorkerInfo cleared = await SchedulingApiFixture.ReadAsync<WorkerInfo>( resumed );
+
+			Assert.False( cleared.Paused );
+			Assert.Null( cleared.Fault );
+		}
+		finally
+		{
+			_fixture.Worker.Resume();
+		}
+	}
+
+	[Fact]
 	public async Task PausingOneWorkerLeavesTheOtherRunning()
 	{
 		const string operatorUser = "group-operator";

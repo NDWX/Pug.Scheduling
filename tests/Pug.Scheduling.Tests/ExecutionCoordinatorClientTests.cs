@@ -78,6 +78,7 @@ public class ExecutionCoordinatorClientTests : IClassFixture<SchedulingApiFixtur
 		Assert.Equal( RunTriggers.Manual, job.Context.Trigger );
 		Assert.Equal( TimeSpan.FromMinutes( 10 ), job.Timeout );
 		Assert.True( job.ClaimExpiry > DateTime.UtcNow );
+		Assert.Equal( new ExecutionCoordinatorOptions().LeaseDuration, job.ClaimDuration );
 
 		Assert.True( await _coordinator.RenewClaimAsync( job.Context.Run, Worker, _worker ) );
 

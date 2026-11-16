@@ -13,8 +13,13 @@ namespace Pug.Scheduling.Abstractions
 	{
 		WorkerInfo GetInfo();
 
+		// Stops new claims. Sets no fault.
 		void Pause();
 
+		// Lifts a pause, whether an operator's or the worker's own: a worker pauses itself when the
+		// coordinator refuses a renewal or completion report, and says why in WorkerInfo.Fault.
+		// Resuming clears that fault, so grant the missing operation first, or the next run meets
+		// the same refusal.
 		void Resume();
 	}
 }

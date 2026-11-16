@@ -61,7 +61,7 @@ builder.Services.AddSchedulingWorkers(
 			Claimant = "jobs-a-reports",
 			Workers = 4,
 			JobType = "report",
-			HeartbeatInterval = TimeSpan.FromSeconds( 30 ),   // well under the scheduler's LeaseDuration (default 2 min)
+			HeartbeatInterval = TimeSpan.FromSeconds( 30 ),   // capped at a third of the scheduler's LeaseDuration (default 2 min)
 			CancellationGrace = TimeSpan.FromSeconds( 10 ),
 			AbandonTimeout = TimeSpan.FromSeconds( 5 )
 		},

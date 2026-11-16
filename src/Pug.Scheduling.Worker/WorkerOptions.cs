@@ -19,13 +19,15 @@ namespace Pug.Scheduling.Worker
 		// The only job type the group's workers claim; null claims any type.
 		public string JobType { get; init; }
 
-		// How long to wait between polls when no work was claimed. Positive, and within
-		// TimerBounds.Maximum.
+		// How long to wait between polls when no work was claimed, after a run whose report was not
+		// recorded, and between retries of a completion report that did not get through (D29).
+		// Positive, and within TimerBounds.Maximum.
 		public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds( 10 );
 
-		// Claim-renewal cadence during job execution. Must be comfortably shorter than the
-		// coordinator's lease duration, or claims lapse mid-run and peers re-execute. Positive, and
-		// within TimerBounds.Maximum.
+		// Claim-renewal cadence during job execution. The worker caps it at a third of its window for
+		// the claim (ClaimedJob.ClaimDuration, the coordinator's lease, less
+		// SchedulerWorker.LeaseTolerance), so a longer value still leaves a renewal and a retry within
+		// each lease; shorter leaves more retries. Positive, and within TimerBounds.Maximum.
 		public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds( 30 );
 
 		// How long a stopped run's handler (timed out, claim lost, host stopping) is given to honour
@@ -40,9 +42,9 @@ namespace Pug.Scheduling.Worker
 		public int MaxDetachedHandlers { get; init; } = 2;
 
 		// How long the worker waits for the coordinator to release a claim it abandons on a
-		// graceful shutdown. Best effort: past this the call is given up on (the lease then lapses
-		// on its own), so it bounds the delay this adds to the host's shutdown. Positive, and
-		// within TimerBounds.Maximum.
+		// graceful shutdown, or after a refused renewal or completion report (D29). Best effort:
+		// past this the call is given up on (the lease then lapses on its own), so it bounds the
+		// delay this adds to the host's shutdown. Positive, and within TimerBounds.Maximum.
 		public TimeSpan AbandonTimeout { get; init; } = TimeSpan.FromSeconds( 5 );
 
 		/// <summary>
