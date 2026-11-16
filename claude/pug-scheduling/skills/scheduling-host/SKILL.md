@@ -110,9 +110,9 @@ It needs `IApplicationData<IDataSession>`, `ISecurityManager` and logging alread
 | `DefaultRetryPolicy` | `MaximumAttempts = 3`, `Backoff = 1 min` | Used when `Definition.RetryPolicy` is null |
 | `MinimumMisfireThreshold` | 15 s | The floor for every `MisfirePolicy.Threshold`, including the default's. Whole seconds, not negative. Stops a too-small threshold from turning every claim into a misfire (under `SKIP`, skipping nearly every occurrence) |
 | `MinimumMisfireThreshold` | 15 s | The floor for every `MisfirePolicy.Threshold`, the default's included. Whole seconds, not negative. Stops a too-small threshold from turning every claim into a misfire (under `SKIP`, skipping nearly every occurrence) |
-| `DefaultTimeout` | 10 min | Used when `Definition.Timeout` is zero (a negative timeout is refused). Above `TimerBounds.Maximum` (2^32−2 ms, about 49.7 days) the `Scheduler` constructor throws `ArgumentException` |
+| `DefaultTimeout` | 10 min | Used when `Definition.Timeout` is zero (a negative timeout is refused). At least 5 s; above `TimerBounds.Maximum` (2^32−2 ms, about 49.7 days) the `Scheduler` constructor throws `ArgumentException` |
 
-These defaults are copied into each definition and stored with it. Every schedule duration must be **whole seconds**; the `Scheduler` constructor throws `ArgumentException` for a default that is not, for a `DefaultMisfirePolicy` threshold below `MinimumMisfireThreshold`, or for a `DefaultTimeout` under 1 s. Definitions need an interval and a timeout of at least 1 s.
+These defaults are copied into each definition and stored with it. Every schedule duration must be **whole seconds**; the `Scheduler` constructor throws `ArgumentException` for a default that is not, for a `DefaultMisfirePolicy` threshold below `MinimumMisfireThreshold`, or for a `DefaultTimeout` under 5 s. Definitions need an interval of at least 1 s and, when specified, a timeout of at least 5 s.
 
 `ExecutionCoordinatorOptions` (`Pug.Scheduling.Abstractions`):
 

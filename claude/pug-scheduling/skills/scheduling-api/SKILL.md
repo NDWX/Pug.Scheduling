@@ -205,7 +205,7 @@ The same exceptions surface in-process and through `SchedulerClient`:
 - **A partial update resets policies to the defaults.** Always start from `current.Definition with { … }`.
 - **`Payload` is a string.** Serialize your object to JSON yourself. Over raw HTTP it is a JSON *string value*, not a nested object.
 - **Times are UTC.** `NotBefore`, `NotAfter` and every returned `DateTime` are UTC, and a `DateTimeKind.Local` window value is misread, not converted. Show times in the user's zone only for display.
-- **Durations are whole seconds.** `Interval`, `Threshold`, `Backoff` and `Timeout` with a fraction of a second are refused with `ArgumentException` (400). `Interval` and `Timeout` must be at least 1 s (a zero `Timeout` means "use the default"), `Backoff` not negative, and `Threshold` at least the host's `MinimumMisfireThreshold` (default 15 s).
+- **Durations are whole seconds.** `Interval`, `Threshold`, `Backoff` and `Timeout` with a fraction of a second are refused with `ArgumentException` (400). `Interval` must be at least 1 s and a specified `Timeout` at least 5 s (a zero `Timeout` means "use the default"), `Backoff` not negative, and `Threshold` at least the host's `MinimumMisfireThreshold` (default 15 s).
 - **The payload is not secret.** Anyone with `LIST` or `GET_INFO` on the schedule reads it. Store references to secrets, never the secrets.
 - **A blank or whitespace identifier is not reliably a 400 over HTTP.** Several schedule routes answer 500 today (a defect). Validate identifiers before calling.
 - **Time zones are resolved on the scheduler host.** An identifier that works on your machine fails with 400 if the host's time-zone data lacks it (for example, a container image without tzdata).

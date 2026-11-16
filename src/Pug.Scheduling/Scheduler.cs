@@ -59,9 +59,10 @@ namespace Pug.Scheduling
 			DurationRules.RequireWholeSeconds(
 					_options.DefaultTimeout, nameof(SchedulerOptions.DefaultTimeout), nameof(options) );
 
-			if( _options.DefaultTimeout < TimeSpan.FromSeconds( 1 ) )
+			if( _options.DefaultTimeout < DurationRules.MinimumTimeout )
 				throw new ArgumentException(
-						$"{nameof(SchedulerOptions.DefaultTimeout)} must be at least 1 second.", nameof(options) );
+						$"{nameof(SchedulerOptions.DefaultTimeout)} must be at least {DurationRules.MinimumTimeout}.",
+						nameof(options) );
 
 			ValidateTimeoutBound( _options.DefaultTimeout, nameof(SchedulerOptions.DefaultTimeout), nameof(options) );
 		}
@@ -124,12 +125,17 @@ namespace Pug.Scheduling
 					throw new ArgumentException( "Retry backoff must not be negative.", nameof(definition) );
 			}
 
-			// Zero means "omitted": ApplyDefaults substitutes DefaultTimeout (itself at least 1 s), so
-			// a stored timeout is always at least 1 s. Anything else must be whole seconds.
+			// Zero means "omitted": ApplyDefaults substitutes DefaultTimeout (itself at least
+			// MinimumTimeout), so a stored timeout is always at least MinimumTimeout. A specified
+			// timeout must be whole seconds and at least MinimumTimeout.
 			DurationRules.RequireWholeSeconds( definition.Timeout, "Timeout", nameof(definition) );
 
 			if( definition.Timeout < TimeSpan.Zero )
 				throw new ArgumentException( "Timeout must not be negative.", nameof(definition) );
+
+			if( definition.Timeout != TimeSpan.Zero && definition.Timeout < DurationRules.MinimumTimeout )
+				throw new ArgumentException(
+						$"Timeout, when specified, must be at least {DurationRules.MinimumTimeout}.", nameof(definition) );
 
 			ValidateTimeoutBound( definition.Timeout, nameof(definition.Timeout), nameof(definition) );
 		}

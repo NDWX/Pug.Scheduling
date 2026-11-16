@@ -435,13 +435,33 @@ public abstract class SchedulerTests<TScheduleDatabase>
 	[Fact]
 	public async Task ZeroTimeoutIsTheDefaultAndNeverStoredAsZero()
 	{
-		// Zero is how a registration omits the timeout; it is replaced by the (at least 1 s) default.
+		// Zero is how a registration omits the timeout; it is replaced by the (at least 5 s) default.
 		string identifier = await _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.Zero } );
 
 		Assert.Equal( TimeSpan.FromMinutes( 10 ), ( await _scheduler.GetScheduleAsync( identifier ) ).Definition.Timeout );
 
 		await Assert.ThrowsAsync<ArgumentException>(
 				() => _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.FromSeconds( -1 ) } ) );
+	}
+
+	[Fact]
+	public async Task SpecifiedTimeoutBelowFiveSecondsIsRejectedAndFiveSecondsIsAccepted()
+	{
+		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.FromSeconds( 4 ) } ) );
+
+		Assert.Equal( "definition", exception.ParamName );
+
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.FromSeconds( 1 ) } ) );
+
+		string identifier = await _scheduler.RegisterAsync( NewDefinition() with { Timeout = TimeSpan.FromSeconds( 5 ) } );
+
+		Assert.Equal( TimeSpan.FromSeconds( 5 ), ( await _scheduler.GetScheduleAsync( identifier ) ).Definition.Timeout );
+
+		// The update path applies the same floor.
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.UpdateDefinitionAsync( identifier, NewDefinition() with { Timeout = TimeSpan.FromSeconds( 4 ) } ) );
 	}
 
 	[Fact]
@@ -493,7 +513,8 @@ public abstract class SchedulerTests<TScheduleDatabase>
 		},
 		new SchedulerOptions { DefaultRetryPolicy = new RetryPolicy { MaximumAttempts = 3, Backoff = SubSecond } },
 		new SchedulerOptions { DefaultTimeout = SubSecond + TimeSpan.FromMinutes( 1 ) },
-		new SchedulerOptions { DefaultTimeout = TimeSpan.Zero }
+		new SchedulerOptions { DefaultTimeout = TimeSpan.Zero },
+		new SchedulerOptions { DefaultTimeout = TimeSpan.FromSeconds( 4 ) }
 	};
 
 	[Theory]
