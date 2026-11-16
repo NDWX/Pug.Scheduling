@@ -212,6 +212,12 @@ and on the default; a smaller one would turn every claim into a misfire. The `Sc
 validates the options (whole seconds, defaults within their minimums). `RecurrenceCalculator` throws
 `InvalidOperationException` for a non-positive interval read from a row written before validation.
 
+**Amended (#41):** a specified `Timeout` must be at least **5 s** (`DurationRules.MinimumTimeout`),
+and so must `SchedulerOptions.DefaultTimeout`; zero still means "omitted". A shorter timeout leaves a
+handler too little time once worker overheads (handler creation, claim round trips, cancellation)
+are counted. The floor is fixed, not host-configurable. It applies when a definition is registered or
+updated; stored schedules are not rewritten.
+
 ## D13 — Job types: schedulable vs executable
 
 `IJobTypeRegistry` (Abstractions) separates what is *schedulable* at the API host from what is

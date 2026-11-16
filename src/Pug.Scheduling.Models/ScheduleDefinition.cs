@@ -95,8 +95,9 @@ namespace Pug.Scheduling.Models
 		}
 
 		// Maximum duration of a single job execution; the run's cancellation token is signalled
-		// once elapsed. Always positive once registered: registrations that omit it
-		// (TimeSpan.Zero) are assigned the service-level default.
+		// once elapsed. Whole seconds; when specified, at least 5 seconds. Registrations that omit
+		// it (TimeSpan.Zero) are assigned the service-level default, so a registered timeout is
+		// always at least 5 seconds.
 		[DataMember]
 		public TimeSpan Timeout
 		{

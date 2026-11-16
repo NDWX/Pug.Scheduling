@@ -24,6 +24,8 @@ namespace Pug.Scheduling.Abstractions
 		// under SKIP skip nearly every occurrence. Whole seconds, not negative.
 		public TimeSpan MinimumMisfireThreshold { get; init; } = TimeSpan.FromSeconds( 15 );
 
+		// The execution timeout given to a schedule that omits one. Whole seconds, at least 5
+		// seconds: the same floor as a timeout a schedule specifies.
 		public TimeSpan DefaultTimeout { get; init; } = TimeSpan.FromMinutes( 10 );
 	}
 }

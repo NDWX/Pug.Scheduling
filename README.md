@@ -107,13 +107,13 @@ Microsoft.Data.Sqlite 10.0.0 pulls in SQLitePCLRaw 2.1.11, which carries a vulne
 `MisfirePolicy.Threshold`, `RetryPolicy.Backoff`, `Timeout`) must be a whole number of seconds, or
 registration and definition updates fail with `ArgumentException` (400). The interval must be at
 least 1 s; a `Timeout` of zero means "omitted" and takes `DefaultTimeout`; a timeout is otherwise at
-least 1 s and at most `TimerBounds.Maximum`; a backoff is not negative. A `MisfirePolicy.Threshold`
+least 5 s and at most `TimerBounds.Maximum`; a backoff is not negative. A `MisfirePolicy.Threshold`
 must be at least `SchedulerOptions.MinimumMisfireThreshold` (default 15 s, whole seconds, not
 negative): a threshold shorter than a claim takes to arrive would turn every claim into a misfire
 and, under `SKIP`, skip nearly every occurrence. The `Scheduler` constructor validates the options
 and throws `ArgumentException` for a sub-second or negative minimum, a `DefaultMisfirePolicy`
 threshold that is below the minimum or not whole seconds, a `DefaultRetryPolicy` backoff that is not
-whole seconds, or a `DefaultTimeout` that is not whole seconds or is under 1 s.
+whole seconds, or a `DefaultTimeout` that is not whole seconds or is under 5 s.
 
 **Status codes.** The facades' exceptions map to the endpoints' responses, and the clients map them
 back:
