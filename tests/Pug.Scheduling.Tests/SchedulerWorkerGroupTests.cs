@@ -50,6 +50,10 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 	{
 		public volatile bool RefusesCompletion = true;
 
+		private int _refusedReports;
+
+		public int RefusedReports => Volatile.Read( ref _refusedReports );
+
 		public Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string? jobType ) =>
 			inner.ClaimDueJobAsync( claimant, worker, jobType! );
 
@@ -59,10 +63,15 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 		public Task<bool> AbandonClaimAsync( string run, string claimant, int worker ) =>
 			inner.AbandonClaimAsync( run, claimant, worker );
 
-		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome ) =>
-			RefusesCompletion
-				? Task.FromException( new NotAuthorized() )
-				: inner.ReportCompletionAsync( run, claimant, worker, result, outcome );
+		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
+		{
+			if( !RefusesCompletion )
+				return inner.ReportCompletionAsync( run, claimant, worker, result, outcome );
+
+			Interlocked.Increment( ref _refusedReports );
+
+			return Task.FromException( new NotAuthorized() );
+		}
 	}
 
 	private static readonly TimeSpan FastPoll = TimeSpan.FromMilliseconds( 25 );
@@ -344,7 +353,7 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 	}
 
 	[Fact]
-	public async Task ARefusedCompletionPausesTheWorkerAndTheSameRunIsCompletedAfterResume()
+	public async Task ARefusedCompletionIsRetriedWithoutPausingAndRecordedOnceGranted()
 	{
 		string jobType = $"refused-{Guid.NewGuid():N}";
 
@@ -373,13 +382,11 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 
 		try
 		{
-			await WaitForAsync( () => Task.FromResult( worker.GetInfo().Fault is not null ) );
+			// Retried every PollInterval within the 2-minute lease, never paused, never released.
+			await WaitForAsync( () => Task.FromResult( coordinator.RefusedReports >= 3 ) );
 
-			// Several polls' worth: a worker still polling would adopt and execute its run again.
-			await Task.Delay( FastPoll * 10 );
-
-			Assert.True( worker.GetInfo().Paused );
-			Assert.Equal( WorkerFaults.CompletionRefused, worker.GetInfo().Fault );
+			Assert.False( worker.GetInfo().Paused );
+			Assert.Null( worker.GetInfo().Fault );
 			Assert.Equal( 1, executions );
 
 			ScheduleRun pending = Assert.Single( await GetRunsAsync( schedule ) );
@@ -387,10 +394,9 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 			Assert.Null( pending.Finished );
 			Assert.Equal( 0, pending.Attempt );
 
-			// The grant lands; the operator resumes. The released run is adopted, not duplicated.
+			// The grant is restored (or the security provider recovers): the next retry records
+			// the same run, executed once.
 			coordinator.RefusesCompletion = false;
-
-			worker.Resume();
 
 			await WaitForAsync( async () => ( await GetRunsAsync( schedule ) ).Any( run => run.Finished is not null ) );
 
@@ -399,8 +405,8 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 			Assert.Equal( pending.Identifier, completed.Identifier );
 			Assert.Equal( RunResults.Succeeded, completed.Result );
 			Assert.Equal( 0, completed.Attempt );
-			Assert.Equal( 2, executions );
-			Assert.Null( worker.GetInfo().Fault );
+			Assert.Equal( 1, executions );
+			Assert.False( worker.GetInfo().Paused );
 		}
 		finally
 		{

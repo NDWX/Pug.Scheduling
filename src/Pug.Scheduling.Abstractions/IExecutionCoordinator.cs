@@ -26,8 +26,10 @@ namespace Pug.Scheduling.Abstractions
 	//
 	// FAILURES, as a worker must read them (D29). Three kinds, and only the first is about the caller:
 	// - Refused: NotAuthorized (Pug.Application.Security; 403 over HTTP). The caller's claimant lacks
-	//   the operation's CoordinatorSecurityOperations grant. It concerns the caller, not the run, and
-	//   repeats on every call until the grants change.
+	//   the operation's CoordinatorSecurityOperations grant — or the security provider is failing
+	//   closed while its backend is down, which reads the same. It concerns the caller, not the run.
+	//   SchedulerWorker therefore treats a refused renewal or report as unconfirmed (retried within
+	//   the lease), and a refused claim as a reason to poll more slowly; it never pauses itself.
 	// - Not held: RenewClaimAsync/AbandonClaimAsync answering false, ClaimNotHeldException,
 	//   UnknownRunException. The claim is gone (lapsed and adopted, finished, deleted); normal at run
 	//   level, and nothing the caller does will bring it back.

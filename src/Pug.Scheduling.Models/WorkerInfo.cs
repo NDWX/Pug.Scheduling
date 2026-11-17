@@ -48,7 +48,7 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Whether the worker is not claiming: paused by an operator, or by itself on a Fault.
+		// Whether an operator paused the worker's claiming. A worker never pauses itself.
 		[Required, DataMember( IsRequired = true )]
 		public bool Paused
 		{
@@ -60,8 +60,9 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
-		// Why the worker paused itself (a WorkerFaults value); null when it did not. Set together
-		// with Paused, and cleared only by resuming the worker: an operator's pause sets none.
+		// Why the coordinator is currently refusing the worker (a WorkerFaults value); null when it is
+		// not. Independent of Paused: the worker keeps retrying, and the fault clears by itself once
+		// the coordinator answers again.
 		[DataMember]
 		public string Fault
 		{

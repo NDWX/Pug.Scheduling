@@ -55,13 +55,15 @@ claim is left to lapse.
 A worker times its claim itself: each claim carries `ClaimDuration` (the coordinator's
 `LeaseDuration`), and the worker treats a claim no renewal confirmed within that duration, less a
 0.5 s tolerance, as lost: it cancels the handler and reports nothing. It claims nothing else until
-the run's report is settled, retrying one that does not get through until the lease runs out. When
-the coordinator **refuses** a renewal or a completion report (403: the claimant lacks `RENEW_CLAIM`
-or `REPORT_COMPLETION`), the worker releases the claim and pauses itself with
-`WorkerInfo.Fault` (`RENEWAL_REFUSED`, `COMPLETION_REFUSED`) and an Error naming the grant: grant it,
-then resume the worker, which clears the fault. Other failures (401, 5xx, network) are retried and
-never pause a worker. After a run whose report was not recorded, the worker waits `PollInterval`
-before claiming again, so it does not adopt its own run straight back.
+the run's report is settled, retrying one that does not get through until the earlier of the lease
+and the run's timeout. **The worker never pauses itself**: a coordinator refusal (403) is retried
+like any other failure, since a security provider failing closed during an outage refuses exactly as
+a missing grant does. A refused renewal is retried until the claim's deadline, a refused report
+until the lease or timeout runs out, and a refused claim every `WorkerOptions.RefusedPollRetryInterval`
+(1 min), shown meanwhile as `WorkerInfo.Fault` = `CLAIM_REFUSED`. Each case logs an Error naming the
+grant: alert on them, since a grant that really is missing re-executes runs until it is granted.
+After a run whose report was not recorded, the worker waits `PollInterval` before claiming again, so
+it does not adopt its own run straight back.
 
 A single completion report is bounded only by the coordinator's transport and store, so keep their
 timeouts finite (HttpClient's 100 s default, Npgsql's 30 s command timeout, SQLite's busy timeout),
@@ -93,9 +95,9 @@ services.AddScheduledJobHandler<ReportJobHandler>( "report" );      // executes 
 services.AddJobPayloadValidator<ReportPayloadValidator>( "report" ); // optional, checked at registration
 
 services.AddSchedulingWorkers( new WorkerOptions { Workers = 4 } );   // omit where jobs execute elsewhere
-// WorkerOptions also sets Claimant, JobType, PollInterval, HeartbeatInterval,
-// CancellationGrace (default 10 s), MaxDetachedHandlers (default 2) and
-// AbandonTimeout (default 5 s).
+// WorkerOptions also sets Claimant, JobType, PollInterval, RefusedPollRetryInterval
+// (default 1 min), HeartbeatInterval, CancellationGrace (default 10 s),
+// MaxDetachedHandlers (default 2) and AbandonTimeout (default 5 s).
 ```
 
 The store exposes `GetSchemaUpgradeScripts()`; run them in the order given (schema version, then
@@ -228,7 +230,8 @@ as `claimant/number`. `Claimant` defaults to the machine name, so a restarted ho
 same holders, re-takes its own claims and adopts its unfinished runs. **Two worker processes on one
 machine must therefore set distinct claimants.** The management endpoints address workers by
 number: `GET workers`, `GET workers/{worker}`, `POST workers/{worker}/pause|resume`. `WorkerInfo`
-reports `Paused` and, for a worker that paused itself, `Fault`; resuming clears it.
+reports `Paused` (an operator's) and `Fault` (`CLAIM_REFUSED` while the coordinator refuses its
+claims; it clears by itself).
 
 ## Authorization
 

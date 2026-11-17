@@ -187,37 +187,29 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
-	public async Task AFaultIsReportedAndClearedByResume()
+	public async Task AFaultIsReportedWithoutAPause()
 	{
-		const string operatorUser = "fault-operator";
+		const string viewer = "fault-viewer";
 
-		Grant( operatorUser, WorkerSecurityOperations.GetInfo, SchedulingApiFixture.WorkerClaimant );
-		Grant( operatorUser, WorkerSecurityOperations.Resume, SchedulingApiFixture.WorkerClaimant );
+		Grant( viewer, WorkerSecurityOperations.GetInfo, SchedulingApiFixture.WorkerClaimant );
 
-		using HttpClient client = _fixture.CreateClient( operatorUser );
+		using HttpClient client = _fixture.CreateClient( viewer );
 
-		_fixture.Worker.Fault( WorkerFaults.CompletionRefused );
+		_fixture.Worker.SetFault( WorkerFaults.ClaimRefused );
 
 		try
 		{
 			WorkerInfo faulted = await SchedulingApiFixture.ReadAsync<WorkerInfo>( await client.GetAsync( "/workers/1" ) );
 
-			Assert.True( faulted.Paused );
-			Assert.Equal( WorkerFaults.CompletionRefused, faulted.Fault );
-
-			HttpResponseMessage resumed = await client.PostAsync( "/workers/1/resume", null );
-
-			Assert.Equal( HttpStatusCode.OK, resumed.StatusCode );
-
-			WorkerInfo cleared = await SchedulingApiFixture.ReadAsync<WorkerInfo>( resumed );
-
-			Assert.False( cleared.Paused );
-			Assert.Null( cleared.Fault );
+			Assert.Equal( WorkerFaults.ClaimRefused, faulted.Fault );
+			Assert.False( faulted.Paused );
 		}
 		finally
 		{
-			_fixture.Worker.Resume();
+			_fixture.Worker.SetFault( null );
 		}
+
+		Assert.Null( ( await SchedulingApiFixture.ReadAsync<WorkerInfo>( await client.GetAsync( "/workers/1" ) ) ).Fault );
 	}
 
 	[Fact]

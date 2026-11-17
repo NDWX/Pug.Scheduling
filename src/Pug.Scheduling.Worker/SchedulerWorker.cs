@@ -25,11 +25,13 @@ namespace Pug.Scheduling.Worker
 	///
 	/// The worker times its claim itself (D29): from <see cref="ClaimedJob.ClaimDuration"/>, less
 	/// <see cref="LeaseTolerance"/>, on its own clock. Unrenewed through that deadline, the claim is
-	/// lost: the handler is stopped and nothing is reported. A coordinator that refuses a renewal or a
-	/// completion report (<see cref="NotAuthorized"/>) makes the worker release the claim (unless the
-	/// handler was detached, D27) and pause
-	/// itself with a <see cref="WorkerInfo.Fault"/>, since every later run would meet the same refusal;
-	/// <see cref="Resume"/> clears it.
+	/// lost: the handler is stopped and nothing is reported. The worker never pauses itself: a
+	/// coordinator refusal (<see cref="NotAuthorized"/>) is retried like any failure that did not get
+	/// through, since a fail-closed security provider whose backend is down refuses exactly as a
+	/// missing grant does. Refused claims are retried at
+	/// <see cref="WorkerOptions.RefusedPollRetryInterval"/> and show as
+	/// <see cref="WorkerFaults.ClaimRefused"/> in <see cref="WorkerInfo.Fault"/> until a claim is
+	/// answered again.
 	/// </summary>
 	public sealed class SchedulerWorker : BackgroundService, ISchedulerWorker
 	{
@@ -63,6 +65,9 @@ namespace Pug.Scheduling.Worker
 
 		private readonly object _stateLock = new();
 		private bool _paused;
+
+		// WorkerFaults.ClaimRefused while the coordinator refuses this worker's claims; null otherwise.
+		// Written by the pump only (ClaimAsync), under _stateLock for GetInfo.
 		private string _fault;
 		private DateTime? _lastPoll;
 		private int _activeJobs;
@@ -144,39 +149,13 @@ namespace Pug.Scheduling.Worker
 			SignalStateChanged();
 		}
 
-		// Also clears a fault: resuming is how an operator says the missing grant is in place.
 		public void Resume()
 		{
 			lock( _stateLock )
-			{
 				_paused = false;
-				_fault = null;
-			}
 
 			_logger.LogInformation( "Worker {Claimant}/{Worker} (job type {JobType}) resumed.",
 									_options.Claimant, _worker, _jobTypeFilter );
-
-			SignalStateChanged();
-		}
-
-		// The worker pauses itself when carrying on would execute work it can neither keep nor record:
-		// the coordinator refused an operation for this worker's claimant, which concerns its grants,
-		// not the run, so every later run would meet the same refusal. Claiming stops until an
-		// operator grants the operation and resumes the worker. A refused claim does not fault the
-		// worker: it holds and executes nothing, and heals by itself once the grant lands.
-		private void Fault( string fault, string operation )
-		{
-			lock( _stateLock )
-			{
-				_paused = true;
-				_fault = fault;
-			}
-
-			_logger.LogError(
-					"Worker {Claimant}/{Worker} (job type {JobType}) paused itself with fault {Fault}: the execution " +
-					"coordinator refused its {Operation} call. Grant {Grant} on the execution coordinator to the " +
-					"claimant, then resume the worker (POST workers/<number>/resume, or ISchedulerWorker.Resume()).",
-					_options.Claimant, _worker, _jobTypeFilter, fault, operation, operation );
 
 			SignalStateChanged();
 		}
@@ -212,7 +191,8 @@ namespace Pug.Scheduling.Worker
 		// - claimed a job: attend it to completion or detachment and settle its report; then poll
 		//   again at once if the report was recorded (more work may be due), otherwise wait
 		//   PollInterval first (see below);
-		// - nothing due (or the claim failed): wait PollInterval, cut short by a state change.
+		// - nothing due (or the claim failed): wait PollInterval, cut short by a state change;
+		// - the claim was refused: wait RefusedPollRetryInterval instead, likewise cut short.
 		private async Task PumpAsync( CancellationToken stoppingToken )
 		{
 			while( !stoppingToken.IsCancellationRequested )
@@ -237,7 +217,7 @@ namespace Pug.Scheduling.Worker
 				// worker's deadline measured from here cannot fall after the coordinator's (D29).
 				long claimRequested = Stopwatch.GetTimestamp();
 
-				ClaimedJob job = await ClaimAsync().ConfigureAwait( false );
+				( ClaimedJob job, bool refused ) = await ClaimAsync().ConfigureAwait( false );
 
 				if( job is not null )
 				{
@@ -251,7 +231,7 @@ namespace Pug.Scheduling.Worker
 					if( recorded )
 						continue;
 
-					// Otherwise (abandoned, not held, dropped unconfirmed, refused, or failed for an
+					// Otherwise (abandoned, not held, dropped unconfirmed or refused, or failed for an
 					// unusable claim) the schedule row may still name this worker as holder, and the
 					// next claim would adopt the same run straight away (D20). Waiting PollInterval
 					// bounds such self-adoption loops — a claim the worker cannot time, a proxy's 404
@@ -267,27 +247,51 @@ namespace Pug.Scheduling.Worker
 				_logger.LogDebug( "Worker {Claimant}/{Worker} (job type {JobType}) found no due work.",
 								_options.Claimant, _worker, _jobTypeFilter );
 
-				await WaitForAsync( stateChanged, _options.PollInterval, stoppingToken ).ConfigureAwait( false );
+				// A refusal concerns the claimant's grants, or a security provider that is failing closed,
+				// and neither recovers in a PollInterval: polling at the slower RefusedPollRetryInterval
+				// keeps a refused worker from hammering the coordinator and its security backend while
+				// still recovering on its own. Pause and resume, a detached handler ending, or the host
+				// stopping cut either wait short.
+				await WaitForAsync( stateChanged, refused ? _options.RefusedPollRetryInterval : _options.PollInterval,
+									stoppingToken )
+					.ConfigureAwait( false );
 			}
 		}
 
-		// Polls the coordinator once; a failed claim is logged and treated as no due work. A refused
-		// claim keeps polling: nothing is held or executed, and it heals once the grant lands.
-		private async Task<ClaimedJob> ClaimAsync()
+		// Polls the coordinator once: the job, or null when none was handed out (nothing due, or the
+		// claim failed), and whether the claim was refused (NotAuthorized). A refusal holds and
+		// executes nothing, so the worker keeps polling and recovers by itself once claims are
+		// answered again. It shows as WorkerFaults.ClaimRefused for the whole episode, from the first
+		// refusal until a claim is answered (with a job or with none), and is logged once per episode:
+		// an Error on its first refusal, Information on its recovery, Debug in between. Any other
+		// failure is not an answer, so it neither sets nor clears the fault.
+		private async Task<(ClaimedJob Job, bool Refused)> ClaimAsync()
 		{
 			ClaimedJob job = null;
+			bool answered = false;
+			bool refused = false;
 
 			try
 			{
 				job = await _coordinator.ClaimDueJobAsync( _options.Claimant, _worker, _options.JobType )
 										.ConfigureAwait( false );
+
+				answered = true;
 			}
 			catch( NotAuthorized exception )
 			{
-				_logger.LogError( exception,
-								"Worker {Claimant}/{Worker} (job type {JobType}) was refused a claim: grant {Operation} on the " +
-								"execution coordinator to the claimant. It keeps polling, and claims once granted.",
-								_options.Claimant, _worker, _jobTypeFilter, CoordinatorSecurityOperations.ClaimJobs );
+				refused = true;
+
+				if( _fault is null )
+					_logger.LogError( exception,
+									"Worker {Claimant}/{Worker} (job type {JobType}) was refused a claim: grant {Operation} on " +
+									"the execution coordinator to the claimant, or check its security provider. It retries " +
+									"every {RetryInterval}, and claims once answered.",
+									_options.Claimant, _worker, _jobTypeFilter, CoordinatorSecurityOperations.ClaimJobs,
+									_options.RefusedPollRetryInterval );
+				else
+					_logger.LogDebug( exception, "Worker {Claimant}/{Worker} (job type {JobType}) is still refused claims.",
+									_options.Claimant, _worker, _jobTypeFilter );
 			}
 			catch( Exception exception )
 			{
@@ -295,10 +299,21 @@ namespace Pug.Scheduling.Worker
 								_options.Claimant, _worker, _jobTypeFilter );
 			}
 
+			if( answered && _fault is not null )
+				_logger.LogInformation( "Worker {Claimant}/{Worker} (job type {JobType}) is no longer refused claims.",
+										_options.Claimant, _worker, _jobTypeFilter );
+
 			lock( _stateLock )
+			{
 				_lastPoll = _timeProvider.GetUtcNow().UtcDateTime;
 
-			return job;
+				if( refused )
+					_fault = WorkerFaults.ClaimRefused;
+				else if( answered )
+					_fault = null;
+			}
+
+			return ( job, refused );
 		}
 
 		// Whether MaxDetachedHandlers detached handlers are still running, so claiming is suspended.
@@ -361,9 +376,8 @@ namespace Pug.Scheduling.Worker
 		// Steps: reject unusable claim parameters (reported as failed, handler never started); start
 		// the handler; attend it (ExecuteAttendedAsync: heartbeat, timeout, grace); classify the
 		// result; then either dispose the run's cancellation (handler ended) or detach (handler still
-		// running); finally report, or for an abandoned run release the claim if that is safe and
-		// fault the worker if the coordinator refused the renewal. Report and claim release come
-		// after Detach so a slow coordinator cannot delay detaching.
+		// running); finally report, or for an abandoned run release the claim if that is safe. Report
+		// and claim release come after Detach so a slow coordinator cannot delay detaching.
 		//
 		// Returns whether the run's report was recorded; the pump waits before claiming again when
 		// it was not.
@@ -381,14 +395,19 @@ namespace Pug.Scheduling.Worker
 
 				// Parameters the worker cannot honour (they may come from a remote coordinator) fail the
 				// run; they must not escape the pump. With no claim it can time, the failure is reported
-				// once, never retried, and the handler never started, so a refusal may release the claim.
+				// once and never retried.
 				RunReport unexecutable = Unexecutable( job );
 
 				if( unexecutable is not null )
-					return await ReportAsync( job, unexecutable, stopwatch, LeaseDeadline.Passed(), true, stoppingToken )
+					return await ReportAsync( job, unexecutable, stopwatch, LeaseDeadline.Passed(),
+											Stopwatch.GetTimestamp(), stoppingToken )
 								.ConfigureAwait( false );
 
 				LeaseDeadline lease = new( job.ClaimDuration, claimRequested );
+
+				// The run's timeout counts from here (RunCancellation's timeout watcher starts now); it
+				// also ends the window for retrying the report (ReportAsync).
+				long handlerStarted = Stopwatch.GetTimestamp();
 
 				RunCancellation cancellation = new(
 						job.Timeout, stoppingToken, exception => LogCallbackFault( job, exception ) );
@@ -411,24 +430,16 @@ namespace Pug.Scheduling.Worker
 
 				// A null report means abandoned (claim lost, or host stopping).
 				if( report is not null )
-					return await ReportAsync( job, report, stopwatch, lease, finished, stoppingToken )
+					return await ReportAsync( job, report, stopwatch, lease, handlerStarted, stoppingToken )
 								.ConfigureAwait( false );
 
-				// Whether to release the abandoned run's claim. Only a stopped handler's: a detached one
+				// The host is stopping and the claim was not lost: release it, so a peer adopts the run
+				// without waiting out the lease (D27). Only a stopped handler's claim: a detached one
 				// is still running, so its claim must lapse rather than let a peer adopt the run while
-				// the old handler still works on it (D27). Released when:
-				// - the renewal was refused: the claim is most likely still held (only renewing it was
-				//   refused), and this worker, about to pause, will not finish the run;
-				// - the host is stopping and the claim was not lost, so a peer adopts without waiting out
-				//   the lease.
-				// A claim no longer held has nothing to release; a lapsed one is left to its lease.
-				if( finished && ( cancellation.Loss == ClaimLoss.Refused ||
-								( cancellation.HostStopping && !cancellation.ClaimLost ) ) )
+				// the old handler still works on it. A claim no longer held has nothing to release; a
+				// lapsed one is left to its lease.
+				if( finished && cancellation.HostStopping && !cancellation.ClaimLost )
 					await TryAbandonClaimAsync( job ).ConfigureAwait( false );
-
-				// Detached or not: every later run would meet the same refusal.
-				if( cancellation.Loss == ClaimLoss.Refused )
-					Fault( WorkerFaults.RenewalRefused, CoordinatorSecurityOperations.RenewClaim );
 
 				return false;
 			}
@@ -450,8 +461,8 @@ namespace Pug.Scheduling.Worker
 		// stopped and given its grace period (the caller detaches it).
 		//
 		// Heartbeat: renews the claim for as long as the worker watches, including the grace. A
-		// claim the heartbeat finds lost (not held, refused, or lapsed unrenewed) stops the run
-		// through LoseClaim.
+		// claim the heartbeat finds lost (not held, or lapsed unrenewed) stops the run through
+		// LoseClaim.
 		//
 		// Phase 1, run: WaitForAsync( run, InfiniteTimeSpan, cancellation.Token ) ends when the
 		// handler finishes or the run is stopped, i.e. cancellation.Token is cancelled: the schedule
@@ -626,7 +637,6 @@ namespace Pug.Scheduling.Worker
 					{
 						ClaimLoss.NotHeld => "claim no longer held",
 						ClaimLoss.Lapsed => "claim lapsed unrenewed",
-						ClaimLoss.Refused => "claim renewal refused",
 						_ => "host stopping"
 					},
 					detail );
@@ -708,29 +718,35 @@ namespace Pug.Scheduling.Worker
 			}
 		}
 
-		// Reports the run's outcome while its claim stands (D29), and returns whether it was recorded.
-		// What the coordinator answers decides what follows:
+		// Reports the run's outcome (D29), and returns whether it was recorded. What the coordinator
+		// answers decides what follows:
 		// - recorded: done;
 		// - not held (ClaimNotHeldException, UnknownRunException): the run was adopted, finished or
 		//   deleted; the outcome is dropped;
-		// - refused (NotAuthorized): the claimant lacks REPORT_COMPLETION. The schedule row still names
-		//   this worker as holder, so polling on would adopt and execute this very run again, and
-		//   again after every refused report, without using up an attempt. The worker pauses itself,
-		//   first releasing the claim (best effort) — but only when the handler has stopped
-		//   (handlerStopped): a detached handler's claim must lapse instead (D27);
-		// - unconfirmed (anything else): retried every PollInterval until the lease deadline, then
-		//   dropped. No pause: an outage must not leave every worker needing a manual resume.
+		// - anything else, a refusal (NotAuthorized) included: retried every PollInterval within the
+		//   retry window, then dropped with an Error. A refusal is retried rather than acted on,
+		//   because a fail-closed security provider refuses during an outage exactly as a missing
+		//   grant does; no claim is released and the worker never pauses.
 		//
-		// Retries have the heartbeat's shape. When the remaining lease is no longer than
+		// The retry window ends at the earlier of two deadlines, past either of which an outcome is
+		// no longer worth delivering:
+		// - the lease deadline: past it a peer may adopt the run, and the claim is as good as lost;
+		// - the run's timeout deadline (handlerStarted + ClaimedJob.Timeout): past it the job counts
+		//   as failed, and a late outcome would contradict that. A TIMED_OUT report therefore gets
+		//   exactly one attempt, as does the report of a claim the worker could not time.
+		// The pump claims nothing while retrying, then waits PollInterval after a dropped report, so
+		// a report that never gets through costs one execution per window plus PollInterval.
+		//
+		// Retries have the heartbeat's shape. When the window's remainder is no longer than
 		// PollInterval, the wait is the whole remainder and the attempt after it is the last: the
 		// deadline is not re-read, since a timer may fire a little before the Stopwatch deadline and
 		// the remainder would then read tiny-positive and spin. The first attempt is made even past
-		// the deadline: the coordinator accepts a lapsed holder's report until a peer adopts the run
+		// the window: the coordinator accepts a lapsed holder's report until a peer adopts the run
 		// (D23). The host stopping ends the retries at once; a single attempt in flight is bounded
 		// only by the coordinator's own call (the transport's and the store's timeouts), which a
 		// host's shutdown budget must allow for.
 		private async Task<bool> ReportAsync( ClaimedJob job, RunReport report, Stopwatch stopwatch, LeaseDeadline lease,
-											bool handlerStopped, CancellationToken stoppingToken )
+											long handlerStarted, CancellationToken stoppingToken )
 		{
 			bool lastAttempt = false;
 
@@ -761,26 +777,20 @@ namespace Pug.Scheduling.Worker
 
 					return false;
 				}
-				catch( NotAuthorized exception )
-				{
-					_logger.LogError( exception,
-									"Worker {Claimant}/{Worker} was refused the completion report of run {Run} of schedule " +
-									"{Schedule}; its {Result} outcome was not recorded.",
-									_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, report.Result );
-
-					if( handlerStopped )
-						await TryAbandonClaimAsync( job ).ConfigureAwait( false );
-
-					Fault( WorkerFaults.CompletionRefused, CoordinatorSecurityOperations.ReportCompletion );
-
-					return false;
-				}
 				catch( Exception exception )
 				{
 					unconfirmed = exception;
 				}
 
-				TimeSpan remaining = lease.Remaining;
+				// Names the grant when the coordinator refused, so the logs say what to fix.
+				string refusal = unconfirmed is NotAuthorized
+									? $" The coordinator refused it: grant {CoordinatorSecurityOperations.ReportCompletion} " +
+									"to the claimant, or check its security provider."
+									: "";
+
+				TimeSpan untilTimeout = job.Timeout - Stopwatch.GetElapsedTime( handlerStarted );
+				TimeSpan untilLapse = lease.Remaining;
+				TimeSpan remaining = untilTimeout < untilLapse ? untilTimeout : untilLapse;
 
 				if( !lastAttempt && remaining > TimeSpan.Zero && !stoppingToken.IsCancellationRequested )
 				{
@@ -788,10 +798,11 @@ namespace Pug.Scheduling.Worker
 
 					_logger.LogWarning( unconfirmed,
 										"Worker {Claimant}/{Worker} failed to report completion of run {Run} of schedule " +
-										"{Schedule}; retrying while its claim stands ({Remaining} left).",
-										_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, remaining );
+										"{Schedule}; retrying for up to {Remaining}.{Refusal}",
+										_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, remaining,
+										refusal );
 
-					// Bounded by PollInterval or, for the last attempt, the remaining lease; the host
+					// Bounded by PollInterval or, for the last attempt, the window's remainder; the host
 					// stopping cuts it short, and the report is then given up below.
 					try
 					{
@@ -808,10 +819,12 @@ namespace Pug.Scheduling.Worker
 
 				_logger.LogError( unconfirmed,
 								"Worker {Claimant}/{Worker} could not report completion of run {Run} of schedule {Schedule} " +
-								"before {Reason}; its {Result} outcome was dropped and the run will be executed again.",
+								"before {Reason}; its {Result} outcome was dropped and the run will be executed again.{Refusal}",
 								_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
-								stoppingToken.IsCancellationRequested ? "the host stopped" : "its claim lapsed",
-								report.Result );
+								stoppingToken.IsCancellationRequested ? "the host stopped"
+								: untilTimeout < untilLapse ? "the run's timeout elapsed"
+								: "its claim lapsed",
+								report.Result, refusal );
 
 				return false;
 			}
@@ -895,11 +908,11 @@ namespace Pug.Scheduling.Worker
 		// waits, then renews; a renewal the coordinator confirms restarts the lease from the moment it
 		// was sent. The claim is lost — loseClaim stops the run, and the heartbeat ends — when:
 		// - the coordinator answers false (no longer held);
-		// - it refuses the renewal (NotAuthorized): the claimant lacks RENEW_CLAIM, which no retry
-		//   fixes;
-		// - the lease deadline arrives with no confirmed renewal (lapsed): renewals failed or hung
-		//   for the whole window, so a peer may already have adopted the run.
-		// Any other failure is unconfirmed: logged and retried at the next beat.
+		// - the lease deadline arrives with no confirmed renewal (lapsed): renewals failed, hung or
+		//   were refused for the whole window, so a peer may already have adopted the run.
+		// Any other failure is unconfirmed: logged and retried at the next beat. That includes a
+		// refusal (NotAuthorized): a fail-closed security provider refuses during an outage exactly as
+		// a missing grant does, so it is retried within the lease rather than acted on.
 		//
 		// The beat is HeartbeatInterval capped at a third of the window (ClaimDuration less
 		// LeaseTolerance), so even a HeartbeatInterval at or above the lease leaves a renewal and a
@@ -917,6 +930,9 @@ namespace Pug.Scheduling.Worker
 		{
 			TimeSpan thirdOfWindow = lease.Window / 3;
 			TimeSpan beat = thirdOfWindow < _options.HeartbeatInterval ? thirdOfWindow : _options.HeartbeatInterval;
+
+			// Whether the latest renewal attempt was refused, so a lapse can say why.
+			bool refused = false;
 
 			try
 			{
@@ -942,7 +958,7 @@ namespace Pug.Scheduling.Worker
 
 					if( remaining <= TimeSpan.Zero )
 					{
-						LoseLapsedClaim( job, loseClaim );
+						LoseLapsedClaim( job, refused, loseClaim );
 
 						return;
 					}
@@ -965,23 +981,27 @@ namespace Pug.Scheduling.Worker
 					catch( TimeoutException ) when( renewal is { IsCompleted: false } )
 					{
 						// Still pending at the deadline: the lapse itself (see above).
-						LoseLapsedClaim( job, loseClaim );
+						LoseLapsedClaim( job, refused, loseClaim );
 
 						return;
 					}
 					catch( NotAuthorized exception )
 					{
+						refused = true;
+
 						_logger.LogWarning( exception,
 											"Worker {Claimant}/{Worker} was refused the renewal of its claim on run {Run} of " +
-											"schedule {Schedule}; the claim is treated as lost.",
-											_options.Claimant, _worker, job.Context.Run, job.Context.Schedule );
+											"schedule {Schedule} (grant {Operation} to the claimant, or check its security " +
+											"provider); retrying while the claim stands ({Remaining} left).",
+											_options.Claimant, _worker, job.Context.Run, job.Context.Schedule,
+											CoordinatorSecurityOperations.RenewClaim, lease.Remaining );
 
-						loseClaim( ClaimLoss.Refused );
-
-						return;
+						continue;
 					}
 					catch( Exception exception )
 					{
+						refused = false;
+
 						_logger.LogWarning( exception,
 											"Worker {Claimant}/{Worker} failed to renew its claim on run {Run} of schedule " +
 											"{Schedule}; retrying while the claim stands ({Remaining} left).",
@@ -1004,6 +1024,8 @@ namespace Pug.Scheduling.Worker
 
 					lease.Renewed( renewalRequested );
 
+					refused = false;
+
 					_logger.LogDebug( "Worker {Claimant}/{Worker} renewed claim of run {Run}.",
 									_options.Claimant, _worker, job.Context.Run );
 				}
@@ -1014,12 +1036,23 @@ namespace Pug.Scheduling.Worker
 			}
 		}
 
-		private void LoseLapsedClaim( ClaimedJob job, Action<ClaimLoss> loseClaim )
+		// A claim lost to refused renewals is an Error naming the grant: with RENEW_CLAIM truly
+		// missing, every run longer than a beat ends this way and is executed again, so it is what an
+		// operator must alert on. Lapses for any other reason are Warnings.
+		private void LoseLapsedClaim( ClaimedJob job, bool refused, Action<ClaimLoss> loseClaim )
 		{
-			_logger.LogWarning(
-					"Worker {Claimant}/{Worker} could not renew its claim on run {Run} of schedule {Schedule} " +
-					"within its claim duration of {ClaimDuration}; the claim is treated as lost.",
-					_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, job.ClaimDuration );
+			if( refused )
+				_logger.LogError(
+						"Worker {Claimant}/{Worker} lost its claim on run {Run} of schedule {Schedule}: the coordinator " +
+						"refused its renewals for the whole claim duration of {ClaimDuration}. Grant {Operation} to " +
+						"the claimant, or check its security provider; the run will be executed again.",
+						_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, job.ClaimDuration,
+						CoordinatorSecurityOperations.RenewClaim );
+			else
+				_logger.LogWarning(
+						"Worker {Claimant}/{Worker} could not renew its claim on run {Run} of schedule {Schedule} " +
+						"within its claim duration of {ClaimDuration}; the claim is treated as lost.",
+						_options.Claimant, _worker, job.Context.Run, job.Context.Schedule, job.ClaimDuration );
 
 			loseClaim( ClaimLoss.Lapsed );
 		}
@@ -1041,10 +1074,7 @@ namespace Pug.Scheduling.Worker
 			NotHeld,
 
 			// No renewal was confirmed before the worker's deadline for the claim.
-			Lapsed,
-
-			// The coordinator refused the renewal (NotAuthorized).
-			Refused
+			Lapsed
 		}
 
 		// The worker's own deadline for a claim (D29): the moment it sent the claim request — or the

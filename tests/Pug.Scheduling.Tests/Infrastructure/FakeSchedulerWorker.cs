@@ -37,19 +37,10 @@ internal sealed class FakeSchedulerWorker : ISchedulerWorker
 
 	public void Pause() => _paused = true;
 
-	// As SchedulerWorker does when the coordinator refuses it: paused, with the reason.
-	internal void Fault( string fault )
-	{
-		_fault = fault;
-		_paused = true;
-	}
+	// As SchedulerWorker does while the coordinator refuses its claims; independent of the pause.
+	internal void SetFault( string? fault ) => _fault = fault;
 
-	// Clears a fault, as SchedulerWorker does.
-	public void Resume()
-	{
-		_paused = false;
-		_fault = null;
-	}
+	public void Resume() => _paused = false;
 }
 
 /// <summary>

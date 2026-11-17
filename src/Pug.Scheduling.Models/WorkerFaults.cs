@@ -1,18 +1,14 @@
 namespace Pug.Scheduling.Models
 {
-	// Well-known values of WorkerInfo.Fault: why a worker paused itself. A worker pauses itself only
-	// when carrying on would execute work it can neither keep nor record; each fault names the
-	// coordinator grant its claimant lacks. Grant it, then resume the worker, which clears the fault.
+	// Well-known values of WorkerInfo.Fault: why the coordinator is currently refusing a worker. A
+	// fault never pauses the worker — it keeps retrying, and the fault clears by itself once the
+	// coordinator answers again (D29).
 	public static class WorkerFaults
 	{
-		// The coordinator refused to renew a claim (NotAuthorized): the claimant lacks RENEW_CLAIM.
-		// Every run longer than a lease would otherwise be cancelled at its first renewal and
-		// executed again by the next claim.
-		public const string RenewalRefused = "RENEWAL_REFUSED";
-
-		// The coordinator refused a completion report (NotAuthorized): the claimant lacks
-		// REPORT_COMPLETION. The worker would otherwise adopt and execute the same run again at
-		// every poll, without ever using up an attempt.
-		public const string CompletionRefused = "COMPLETION_REFUSED";
+		// The coordinator refuses the worker's claims (NotAuthorized): its claimant lacks CLAIM_JOBS,
+		// or the coordinator's security provider is failing closed. Set from the first refused claim
+		// until a claim is answered, with a job or with none; meanwhile the worker polls at
+		// WorkerOptions.RefusedPollRetryInterval.
+		public const string ClaimRefused = "CLAIM_REFUSED";
 	}
 }
