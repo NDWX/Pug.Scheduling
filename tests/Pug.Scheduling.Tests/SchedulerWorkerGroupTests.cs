@@ -54,8 +54,20 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 
 		public int RefusedReports => Volatile.Read( ref _refusedReports );
 
-		public Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string? jobType ) =>
-			inner.ClaimDueJobAsync( claimant, worker, jobType! );
+		private int _claimed;
+
+		// Claims that handed out a job.
+		public int Claimed => Volatile.Read( ref _claimed );
+
+		public async Task<ClaimedJob?> ClaimDueJobAsync( string claimant, int worker, string? jobType )
+		{
+			ClaimedJob? job = await inner.ClaimDueJobAsync( claimant, worker, jobType! );
+
+			if( job is not null )
+				Interlocked.Increment( ref _claimed );
+
+			return job;
+		}
 
 		public Task<bool> RenewClaimAsync( string run, string claimant, int worker ) =>
 			inner.RenewClaimAsync( run, claimant, worker );
@@ -71,6 +83,39 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 			Interlocked.Increment( ref _refusedReports );
 
 			return Task.FromException( new NotAuthorized() );
+		}
+	}
+
+	// Offers one occurrence to whichever claimant it is told to, until a report of it is recorded,
+	// and answers "not held" to reports from the claimant it refuses — so that claimant drops (and
+	// remembers) its success at once.
+	private sealed class OneOccurrenceCoordinator( ClaimedJob job, string refusedReporter ) : IExecutionCoordinator
+	{
+		public volatile string? OfferTo;
+
+		private int _reportAttempts;
+
+		public int ReportAttempts => Volatile.Read( ref _reportAttempts );
+
+		public TaskCompletionSource<string> Recorded { get; } = new( TaskCreationOptions.RunContinuationsAsynchronously );
+
+		public Task<ClaimedJob?> ClaimDueJobAsync( string claimant, int worker, string? jobType ) =>
+			Task.FromResult( claimant == OfferTo && !Recorded.Task.IsCompleted ? job : null );
+
+		public Task<bool> RenewClaimAsync( string run, string claimant, int worker ) => Task.FromResult( true );
+
+		public Task<bool> AbandonClaimAsync( string run, string claimant, int worker ) => Task.FromResult( true );
+
+		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
+		{
+			Interlocked.Increment( ref _reportAttempts );
+
+			if( claimant == refusedReporter )
+				return Task.FromException( new ClaimNotHeldException( run ) );
+
+			Recorded.TrySetResult( claimant );
+
+			return Task.CompletedTask;
 		}
 	}
 
@@ -414,13 +459,157 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 		}
 	}
 
+	[Fact]
+	public async Task ASuccessRefusedPastTheLeaseIsReplayedOnReadoptionAndRecordedOnceGranted()
+	{
+		string jobType = $"replayed-{Guid.NewGuid():N}";
+
+		string schedule = await InsertDueScheduleAsync( jobType );
+
+		int executions = 0;
+
+		DelegateJobHandler handler = new(
+				( _, _, _ ) =>
+				{
+					Interlocked.Increment( ref executions );
+
+					return Task.FromResult( new JobOutcome { Successful = true } );
+				} );
+
+		// The shortest lease the coordinator accepts, so the report's window (9.5 s) runs out.
+		CompletionRefusingCoordinator coordinator = new( NewCoordinator( ExecutionCoordinatorOptions.MinimumLeaseDuration ) );
+
+		using IHost host = BuildHost(
+				jobType, handler,
+				new WorkerOptions { Claimant = "replayed", JobType = jobType, PollInterval = FastPoll },
+				coordinator );
+
+		await host.StartAsync();
+
+		try
+		{
+			// The report is dropped at the lease deadline and the success remembered; the next claim
+			// adopts the same run (the row still names this worker as holder) and replays it.
+			await WaitForAsync( () => Task.FromResult( coordinator.Claimed >= 2 ), TimeSpan.FromSeconds( 30 ) );
+
+			Assert.Equal( 1, executions );
+
+			ScheduleRun pending = Assert.Single( await GetRunsAsync( schedule ) );
+
+			Assert.Null( pending.Finished );
+			Assert.Equal( 0, pending.Attempt );
+
+			// The grant is restored: the replay's retry records the run.
+			coordinator.RefusesCompletion = false;
+
+			await WaitForAsync( async () => ( await GetRunsAsync( schedule ) ).Any( run => run.Finished is not null ) );
+
+			ScheduleRun completed = Assert.Single( await GetRunsAsync( schedule ) );
+
+			Assert.Equal( pending.Identifier, completed.Identifier );
+			Assert.Equal( RunResults.Succeeded, completed.Result );
+			Assert.Equal( 0, completed.Attempt );
+			Assert.Equal( 1, executions );
+		}
+		finally
+		{
+			await host.StopAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GroupsOnTheSameCoordinatorShareOneReplayStoreAndAGroupWithItsOwnDoesNot()
+	{
+		ScheduledJobContext occurrence = new()
+		{
+			Schedule = "schedule-1",
+			Run = "run-1",
+			Domain = "tenant-1",
+			Owner = new Reference { Type = "USER", Identifier = "owner-1" },
+			JobType = "test",
+			ScheduledFor = new DateTime( 2030, 1, 1, 0, 0, 0, DateTimeKind.Utc ),
+			Attempt = 0,
+			Trigger = RunTriggers.Schedule
+		};
+
+		ClaimedJob job = new()
+		{
+			Context = occurrence,
+			Timeout = TimeSpan.FromMinutes( 1 ),
+			ClaimExpiry = DateTime.UtcNow.AddMinutes( 2 ),
+			ClaimDuration = TimeSpan.FromMinutes( 2 )
+		};
+
+		// The container's coordinator: group "first" has its report refused as not held, and
+		// remembers the success; group "second" then claims the same occurrence. Group "own" claims
+		// the same occurrence through its own coordinator.
+		OneOccurrenceCoordinator shared = new( job, refusedReporter: "first" ) { OfferTo = "first" };
+		OneOccurrenceCoordinator own = new( job, refusedReporter: "nobody" );
+
+		int executions = 0;
+
+		DelegateJobHandler handler = new(
+				( _, _, _ ) =>
+				{
+					Interlocked.Increment( ref executions );
+
+					return Task.FromResult( new JobOutcome { Successful = true } );
+				} );
+
+		ServiceCollection services = NewServices( shared );
+
+		services.AddSingleton<IScheduledJobHandlerFactoryRegistry>( new AnyTypeRegistry( new DelegateJobHandlerFactory( _ => handler ) ) );
+
+		// A long PollInterval: after its unrecorded run, "first" does not claim again during the test.
+		services.AddSchedulingWorkers( new WorkerOptions { Claimant = "first", PollInterval = TimeSpan.FromMinutes( 1 ) } );
+		services.AddSchedulingWorkers( new WorkerOptions { Claimant = "second", PollInterval = FastPoll } );
+		services.AddSchedulingWorkers( new WorkerOptions { Claimant = "own", PollInterval = FastPoll }, _ => own );
+
+		await using ServiceProvider provider = services.BuildServiceProvider();
+
+		SchedulerWorkerRegistry registry = provider.GetRequiredService<SchedulerWorkerRegistry>();
+
+		SchedulerWorker first = registry.Find( 1 ), second = registry.Find( 2 ), separate = registry.Find( 3 );
+
+		await first.StartAsync( CancellationToken.None );
+
+		try
+		{
+			// Settled once the run is no longer attended: the success is remembered by then.
+			await WaitForAsync( () => Task.FromResult( shared.ReportAttempts == 1 && first.GetInfo().ActiveJobs == 0 ) );
+
+			Assert.Equal( 1, executions );
+
+			// Another store: "own" runs the occurrence.
+			own.OfferTo = "own";
+
+			await separate.StartAsync( CancellationToken.None );
+
+			Assert.Equal( "own", await own.Recorded.Task.WaitAsync( TimeSpan.FromSeconds( 10 ) ) );
+			Assert.Equal( 2, executions );
+
+			// The same store: "second" replays it.
+			shared.OfferTo = "second";
+
+			await second.StartAsync( CancellationToken.None );
+
+			Assert.Equal( "second", await shared.Recorded.Task.WaitAsync( TimeSpan.FromSeconds( 10 ) ) );
+			Assert.Equal( 2, executions );
+		}
+		finally
+		{
+			await Task.WhenAll( first.StopAsync( CancellationToken.None ), second.StopAsync( CancellationToken.None ),
+								separate.StopAsync( CancellationToken.None ) );
+		}
+	}
+
 	// The real coordinator, reached in-process (no principal ⇒ no grants needed).
-	private ExecutionCoordinator NewCoordinator() =>
+	private ExecutionCoordinator NewCoordinator( TimeSpan? leaseDuration = null ) =>
 		new(
 				new SequentialIdGenerator( $"run-{Guid.NewGuid():N}" ),
 				_scheduleDatabase.ApplicationData,
 				SecurityManagerFactory.CreateWithoutPrincipal(),
-				new ExecutionCoordinatorOptions(),
+				new ExecutionCoordinatorOptions { LeaseDuration = leaseDuration ?? TimeSpan.FromMinutes( 2 ) },
 				new TimeProviderClock( TimeProvider.System ),
 				NullLogger<ExecutionCoordinator>.Instance );
 
@@ -502,9 +691,9 @@ public abstract class SchedulerWorkerGroupTests<TScheduleDatabase>
 		_scheduleDatabase.ApplicationData.ReadAsync(
 				( session, context ) => session.GetRunsAsync( context ), schedule );
 
-	private static async Task WaitForAsync( Func<Task<bool>> condition )
+	private static async Task WaitForAsync( Func<Task<bool>> condition, TimeSpan? within = null )
 	{
-		DateTime deadline = DateTime.UtcNow.AddSeconds( 10 );
+		DateTime deadline = DateTime.UtcNow + ( within ?? TimeSpan.FromSeconds( 10 ) );
 
 		while( DateTime.UtcNow < deadline )
 		{

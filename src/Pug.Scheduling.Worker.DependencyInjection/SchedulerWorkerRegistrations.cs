@@ -33,19 +33,26 @@ namespace Pug.Scheduling.Worker.DependencyInjection
 		}
 
 		// Creates every registered worker. Each group's coordinator is resolved once and shared by
-		// the group's workers.
+		// the group's workers. Workers on the same coordinator instance share one UnrecordedSuccesses
+		// store, so a success one worker could not record is replayed by whichever worker of the host
+		// claims the occurrence next (D29). Per coordinator rather than per host: a group whose factory
+		// binds another scheduler may see schedule identifiers that collide with this one's. Instances
+		// are compared by reference, so groups on the container's coordinator share its store.
 		public SchedulerWorkerRegistry CreateRegistry( IServiceProvider provider )
 		{
 			IScheduledJobHandlerFactoryRegistry handlerFactories =
 				provider.GetRequiredService<IScheduledJobHandlerFactoryRegistry>();
 
 			// The host's TimeProvider when it registers one, else the system's. Used for the workers'
-			// LastPoll only; AddScheduling's decisions use ISchedulingClock and ignore a TimeProvider.
+			// LastPoll and the replay stores' retention only; AddScheduling's decisions use
+			// ISchedulingClock and ignore a TimeProvider.
 			TimeProvider timeProvider = provider.GetService<TimeProvider>() ?? TimeProvider.System;
 
 			ILogger<SchedulerWorker> logger = provider.GetRequiredService<ILogger<SchedulerWorker>>();
 
 			List<SchedulerWorker> workers = new( Workers );
+
+			Dictionary<IExecutionCoordinator, UnrecordedSuccesses> stores = new( ReferenceEqualityComparer.Instance );
 
 			foreach( SchedulerWorkerGroup group in Groups )
 			{
@@ -56,11 +63,14 @@ namespace Pug.Scheduling.Worker.DependencyInjection
 																$"The coordinator factory of worker group '{group.Options.Claimant}' " +
 																"returned no coordinator." );
 
+				if( !stores.TryGetValue( coordinator, out UnrecordedSuccesses store ) )
+					stores[coordinator] = store = new UnrecordedSuccesses( timeProvider );
+
 				for( int index = 0; index < group.Options.Workers; index++ )
 					workers.Add(
 							new SchedulerWorker(
 									coordinator, handlerFactories, group.Options, group.FirstWorker + index,
-									timeProvider, logger ) );
+									timeProvider, logger, store ) );
 			}
 
 			return new SchedulerWorkerRegistry( workers );

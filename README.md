@@ -55,15 +55,19 @@ claim is left to lapse.
 A worker times its claim itself: each claim carries `ClaimDuration` (the coordinator's
 `LeaseDuration`), and the worker treats a claim no renewal confirmed within that duration, less a
 0.5 s tolerance, as lost: it cancels the handler and reports nothing. It claims nothing else until
-the run's report is settled, retrying one that does not get through until the earlier of the lease
-and the run's timeout. **The worker never pauses itself**: a coordinator refusal (403) is retried
-like any other failure, since a security provider failing closed during an outage refuses exactly as
-a missing grant does. A refused renewal is retried until the claim's deadline, a refused report
-until the lease or timeout runs out, and a refused claim every `WorkerOptions.RefusedPollRetryInterval`
-(1 min), shown meanwhile as `WorkerInfo.Fault` = `CLAIM_REFUSED`. Each case logs an Error naming the
-grant: alert on them, since a grant that really is missing re-executes runs until it is granted.
-After a run whose report was not recorded, the worker waits `PollInterval` before claiming again, so
-it does not adopt its own run straight back.
+the run's report is settled, retrying one that does not get through until the lease runs out. A
+success it could not get recorded is remembered by occurrence (`UnrecordedSuccesses`, shared by the
+host's workers on one coordinator, in memory, 24 h and 1,000 entries at most) and **replayed** when
+the occurrence is claimed again on that host: the outcome is reported, the handler is not run.
+Handlers must still be idempotent on `(Schedule, ScheduledFor)`: a restart or another host runs the
+job again. **The worker never pauses itself**: a coordinator refusal (403) is retried like any other
+failure, since a security provider failing closed during an outage refuses exactly as a missing grant
+does. A refused renewal is retried until the claim's deadline, a refused report until the lease runs
+out, and a refused claim every `WorkerOptions.RefusedPollRetryInterval` (1 min), shown meanwhile as
+`WorkerInfo.Fault` = `CLAIM_REFUSED`. Each case logs an Error naming the grant: alert on them, since a
+grant that really is missing keeps the occurrence claimed (and, for `RENEW_CLAIM`, cuts and repeats
+every run longer than the window, the lease less 0.5 s) until it is granted. After a run whose report was not recorded, the
+worker waits `PollInterval` before claiming again, so it does not adopt its own run straight back.
 
 A single completion report is bounded only by the coordinator's transport and store, so keep their
 timeouts finite (HttpClient's 100 s default, Npgsql's 30 s command timeout, SQLite's busy timeout),
