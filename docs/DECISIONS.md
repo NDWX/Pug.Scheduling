@@ -833,6 +833,8 @@ past its lease, so a peer adopted and ran it concurrently. And after an unreport
 row still named the worker as holder, so its next poll — at once — adopted the same run (D20), and a
 refused or failing completion re-executed it in a tight loop that never used up an attempt.
 
+- **Where it lives (#50):** one claimed job's claim lifecycle — guard, lease deadline, heartbeat, replay,
+  report and release — is the internal `Work` class (`Work.cs`); `SchedulerWorker` is the pump.
 - **Failure classification**, documented on `IExecutionCoordinator` and applied in the worker's catch
   clauses (no shared helper: the worker is its only consumer):
   - *refused*: `NotAuthorized` (403). It concerns the caller, not the run: a missing grant, or a
