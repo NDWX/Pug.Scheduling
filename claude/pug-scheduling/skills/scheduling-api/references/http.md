@@ -8,13 +8,13 @@ Every route requires an authenticated caller (401 otherwise) whom the host maps 
 |---|---|---|---|
 | `GET {base}?domain=&ownerType=&ownerIdentifier=&jobType=` | `domain` is required. Owner as a pair, both or neither | 200 `ScheduleInfo[]` | 400, 403 |
 | `POST {base}?ownerType=&ownerIdentifier=` | Body: `ScheduleDefinition`. Owner pair optional (on-behalf) | 201, body: the new identifier as a JSON string | 400, 403 |
-| `GET {base}/{identifier}` | | 200 `ScheduleInfo` | 403, 404 |
+| `GET {base}/{identifier}` | | 200 `ScheduleInfo` | 400, 403, 404 |
 | `PUT {base}/{identifier}` | Body: `ScheduleDefinition` (the whole definition) | 200 | 400, 403, 404 |
-| `DELETE {base}/{identifier}` | | 200 | 403, 404 |
-| `POST {base}/{identifier}/pause` | No body needed | 200 | 403, 404 |
-| `POST {base}/{identifier}/resume` | No body needed | 200 | 403, 404 |
-| `POST {base}/{identifier}/run` | No body needed | **202** (recorded, not yet run) | 403, 404, **409** `RunInProgressResultInfo` |
-| `GET {base}/{identifier}/runs?from=&to=` | `from`, `to`: optional UTC instants with a `Z` (`2026-11-15T03:00:00Z`), inclusive, on `Started` | 200 `ScheduleRun[]`, most recent first | 403, 404 |
+| `DELETE {base}/{identifier}` | | 200 | 400, 403, 404 |
+| `POST {base}/{identifier}/pause` | No body needed | 200 | 400, 403, 404 |
+| `POST {base}/{identifier}/resume` | No body needed | 200 | 400, 403, 404 |
+| `POST {base}/{identifier}/run` | No body needed | **202** (recorded, not yet run) | 400, 403, 404, **409** `RunInProgressResultInfo` |
+| `GET {base}/{identifier}/runs?from=&to=` | `from`, `to`: optional UTC instants with a `Z` (`2026-11-15T03:00:00Z`), inclusive, on `Started` | 200 `ScheduleRun[]`, most recent first | 400, 403, 404 |
 
 ## Bodies
 

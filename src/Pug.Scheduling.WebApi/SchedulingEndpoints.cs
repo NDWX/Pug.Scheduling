@@ -174,16 +174,6 @@ public static class SchedulingEndpoints
 		return true;
 	}
 
-	private static IResult InvalidArgument( ArgumentException exception ) =>
-		Results.BadRequest(
-				new BadRequestResultInfo
-				{
-					Type = "INVALID_ARGUMENT",
-					RequestArgument = exception.ParamName ?? string.Empty,
-					Message = exception.Message
-				}
-			);
-
 	private static async Task<IResult> GetSchedules(
 		// Nullable so an omitted domain reaches the handler and is reported as a structured
 		// BadRequestResultInfo, rather than failing model binding with an empty 400 body.
@@ -199,42 +189,23 @@ public static class SchedulingEndpoints
 		if( !TryGetOwner( ownerType, ownerIdentifier, out Reference? owner, out BadRequestResultInfo? error ) )
 			return Results.BadRequest( error );
 
-		try
-		{
-			IEnumerable<ScheduleInfo> schedules =
-				await scheduler.GetSchedulesAsync( domain, owner, jobType ).ConfigureAwait( false );
-
-			return Results.Ok( schedules );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+		return await FacadeResults.TranslateAsync(
+								async () => Results.Ok(
+										await scheduler.GetSchedulesAsync( domain, owner, jobType ).ConfigureAwait( false ) )
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> GetSchedule(
 		[FromRoute] string identifier,
 		[FromServices] IScheduler scheduler )
 	{
-		if( string.IsNullOrEmpty( identifier ) )
+		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		try
-		{
-			return Results.Ok( await scheduler.GetScheduleAsync( identifier ).ConfigureAwait( false ) );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownScheduleException )
-		{
-			return Results.NotFound();
-		}
+		return await FacadeResults.TranslateAsync(
+								async () => Results.Ok(
+										await scheduler.GetScheduleAsync( identifier ).ConfigureAwait( false ) )
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> GetScheduleRuns(
@@ -243,24 +214,13 @@ public static class SchedulingEndpoints
 		[FromQuery] DateTime? to,
 		[FromServices] IScheduler scheduler )
 	{
-		if( string.IsNullOrEmpty( identifier ) )
+		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		try
-		{
-			IEnumerable<ScheduleRun> runs =
-				await scheduler.GetRunsAsync( identifier, from, to ).ConfigureAwait( false );
-
-			return Results.Ok( runs );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownScheduleException )
-		{
-			return Results.NotFound();
-		}
+		return await FacadeResults.TranslateAsync(
+								async () => Results.Ok(
+										await scheduler.GetRunsAsync( identifier, from, to ).ConfigureAwait( false ) )
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> RegisterSchedule(
@@ -275,22 +235,16 @@ public static class SchedulingEndpoints
 		if( !TryGetOwner( ownerType, ownerIdentifier, out Reference? owner, out BadRequestResultInfo? error ) )
 			return Results.BadRequest( error );
 
-		try
-		{
-			// Owner defaults to the calling principal when unspecified; registering on behalf of
-			// another principal requires the CREATE_ON_BEHALF grant.
-			string identifier = await scheduler.RegisterAsync( definition, owner ).ConfigureAwait( false );
+		return await FacadeResults.TranslateAsync(
+								async () =>
+								{
+									// Owner defaults to the calling principal when unspecified; registering on behalf of
+									// another principal requires the CREATE_ON_BEHALF grant.
+									string identifier = await scheduler.RegisterAsync( definition, owner ).ConfigureAwait( false );
 
-			return Results.Created( string.Empty, identifier );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+									return Results.Created( string.Empty, identifier );
+								}
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> UpdateScheduleDefinition(
@@ -298,53 +252,37 @@ public static class SchedulingEndpoints
 		[FromBody] ScheduleDefinition? definition,
 		[FromServices] IScheduler scheduler )
 	{
-		if( string.IsNullOrEmpty( identifier ) )
+		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
 		if( definition is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(definition) ) );
 
-		try
-		{
-			await scheduler.UpdateDefinitionAsync( identifier, definition ).ConfigureAwait( false );
+		return await FacadeResults.TranslateAsync(
+								async () =>
+								{
+									await scheduler.UpdateDefinitionAsync( identifier, definition ).ConfigureAwait( false );
 
-			return Results.Ok();
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownScheduleException )
-		{
-			return Results.NotFound();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+									return Results.Ok();
+								}
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> DeleteSchedule(
 		[FromRoute] string identifier,
 		[FromServices] IScheduler scheduler )
 	{
-		if( string.IsNullOrEmpty( identifier ) )
+		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		try
-		{
-			await scheduler.DeleteAsync( identifier ).ConfigureAwait( false );
+		return await FacadeResults.TranslateAsync(
+								async () =>
+								{
+									await scheduler.DeleteAsync( identifier ).ConfigureAwait( false );
 
-			return Results.Ok();
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownScheduleException )
-		{
-			return Results.NotFound();
-		}
+									return Results.Ok();
+								}
+							).ConfigureAwait( false );
 	}
 
 	private static Task<IResult> PauseSchedule(
@@ -359,55 +297,36 @@ public static class SchedulingEndpoints
 
 	private static async Task<IResult> SetPausedAsync( string identifier, IScheduler scheduler, bool paused )
 	{
-		if( string.IsNullOrEmpty( identifier ) )
+		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		try
-		{
-			if( paused )
-				await scheduler.PauseAsync( identifier ).ConfigureAwait( false );
-			else
-				await scheduler.ResumeAsync( identifier ).ConfigureAwait( false );
+		return await FacadeResults.TranslateAsync(
+								async () =>
+								{
+									if( paused )
+										await scheduler.PauseAsync( identifier ).ConfigureAwait( false );
+									else
+										await scheduler.ResumeAsync( identifier ).ConfigureAwait( false );
 
-			return Results.Ok();
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownScheduleException )
-		{
-			return Results.NotFound();
-		}
+									return Results.Ok();
+								}
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> RunScheduleNow(
 		[FromRoute] string identifier,
 		[FromServices] IScheduler scheduler )
 	{
-		if( string.IsNullOrEmpty( identifier ) )
+		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		try
-		{
-			await scheduler.RunNowAsync( identifier ).ConfigureAwait( false );
+		return await FacadeResults.TranslateAsync(
+								async () =>
+								{
+									await scheduler.RunNowAsync( identifier ).ConfigureAwait( false );
 
-			return Results.Accepted();
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownScheduleException )
-		{
-			return Results.NotFound();
-		}
-		catch( RunInProgressException exception )
-		{
-			// Refused, not queued: nothing was recorded.
-			return Results.Conflict(
-					new RunInProgressResultInfo(
-							exception.Schedule, exception.Run, exception.Holder, exception.LeaseExpiry ) );
-		}
+									return Results.Accepted();
+								}
+							).ConfigureAwait( false );
 	}
 }

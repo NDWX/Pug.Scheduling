@@ -308,7 +308,8 @@ segment is the default of a host-configurable base path, and each surface takes 
   none of their own; they require an authenticated caller with a principal (D28, #34) and map outcomes: `NotAuthorized` → 403,
   `UnknownScheduleException`/`UnknownRunException` → 404, `ClaimNotHeldException` → 409 (completion
   only), `RunInProgressException` → 409 with a `RunInProgressResultInfo` body (run route only;
-  amended in #10), `ArgumentException` → 400 `BadRequestResultInfo`. Worker management endpoints remain the one exception —
+  amended in #10), `ArgumentException` → 400 `BadRequestResultInfo`. This mapping lives once, in `FacadeResults.TranslateAsync`, which wraps every
+  facade call, so no route can miss one. Worker management endpoints remain the one exception —
   `ISchedulerWorker` is a local control surface with no facade behind it — so they check
   `WorkerSecurityOperations` on `SecurityObjectTypes.SchedulerWorker`, qualified by claimant, with
   no owner exemption.
