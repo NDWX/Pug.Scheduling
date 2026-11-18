@@ -14,6 +14,8 @@ namespace Pug.Scheduling.Client;
 /// 400 → <see cref="ArgumentException"/> rebuilt from the <see cref="BadRequestResultInfo"/> body.
 /// 401 is deliberately left as the transport's <c>AuthenticationException</c>: no facade contract
 /// covers "you did not authenticate", and it is not the caller's argument that is at fault.
+/// Every other failure status surfaces as <see cref="HttpApiRequestException"/>; a call that returns
+/// the raw response must pass it through <see cref="EnsureSuccess"/> for that to hold.
 /// </summary>
 internal static class ApiFailures
 {
@@ -37,6 +39,17 @@ internal static class ApiFailures
 		{
 			throw AsArgumentException( exception );
 		}
+	}
+
+	// Pug.HttpApiClient 0.6.0 throws only for the statuses its EnsureSuccessResponse lists, and
+	// hands any other failure (503, 504, 429, 408, …) back as a response; only its typed helpers,
+	// which deserialize the body, check the status themselves. A call reading a raw response
+	// therefore checks it here, or a completion report answered 503 would read as recorded and the
+	// worker would drop the run's outcome believing it delivered (D29).
+	internal static void EnsureSuccess( HttpResponseMessage response )
+	{
+		if( !response.IsSuccessStatusCode )
+			throw new HttpApiRequestException( response );
 	}
 
 	internal static async Task TranslateAsync( Func<Task> call, Func<Exception>? unknownResource = null ) =>

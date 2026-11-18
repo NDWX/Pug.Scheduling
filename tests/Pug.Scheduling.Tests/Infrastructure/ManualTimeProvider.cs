@@ -16,5 +16,11 @@ public sealed class ManualTimeProvider : TimeProvider
 
 	public override DateTimeOffset GetUtcNow() => _now;
 
+	// Timestamps stand still with the clock too, so elapsed-time measurements (GetElapsedTime) move
+	// only when advanced.
+	public override long GetTimestamp() => _now.UtcTicks;
+
+	public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
 	public void Advance( TimeSpan by ) => _now += by;
 }

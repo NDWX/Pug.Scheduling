@@ -89,6 +89,8 @@ public class SchedulerClient : ApiClient, IScheduler
 					using HttpResponseMessage response =
 						await HttpClient.PutAsync( SchedulePath( identifier ), definition )
 										.ConfigureAwait( false );
+
+					ApiFailures.EnsureSuccess( response );
 				},
 				() => new UnknownScheduleException( identifier )
 			);
@@ -99,6 +101,8 @@ public class SchedulerClient : ApiClient, IScheduler
 				{
 					using HttpResponseMessage response =
 						await HttpClient.DeleteAsync( SchedulePath( identifier ) ).ConfigureAwait( false );
+
+					ApiFailures.EnsureSuccess( response );
 				},
 				() => new UnknownScheduleException( identifier )
 			);
@@ -116,6 +120,8 @@ public class SchedulerClient : ApiClient, IScheduler
 						using HttpResponseMessage response =
 							await HttpClient.PostAsync( $"{SchedulePath( identifier )}/run", new object() )
 											.ConfigureAwait( false );
+
+						ApiFailures.EnsureSuccess( response );
 					}
 					catch( HttpApiRequestException exception ) when( exception.ResponseStatusCode == HttpStatusCode.Conflict )
 					{
@@ -134,6 +140,8 @@ public class SchedulerClient : ApiClient, IScheduler
 					using HttpResponseMessage response =
 						await HttpClient.PostAsync( $"{SchedulePath( identifier )}/{action}", new object() )
 										.ConfigureAwait( false );
+
+					ApiFailures.EnsureSuccess( response );
 				},
 				() => new UnknownScheduleException( identifier )
 			);

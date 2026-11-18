@@ -69,6 +69,14 @@ namespace Pug.Scheduling
 			if( _options.ClaimCandidates < 1 )
 				throw new ArgumentException( "At least one claim candidate is required.", nameof(options) );
 
+			// Every claim hands this to its worker as ClaimDuration, which the worker times its claim by
+			// and waits on, so it must be long enough to renew within and short enough for a timer.
+			if( _options.LeaseDuration < ExecutionCoordinatorOptions.MinimumLeaseDuration ||
+				_options.LeaseDuration > TimerBounds.Maximum )
+				throw new ArgumentException(
+						$"Lease duration must be from {ExecutionCoordinatorOptions.MinimumLeaseDuration} to {TimerBounds.Maximum}.",
+						nameof(options) );
+
 			_clock = clock ?? throw new ArgumentNullException( nameof(clock) );
 
 			_logger = logger ?? throw new ArgumentNullException( nameof(logger) );
@@ -382,7 +390,9 @@ namespace Pug.Scheduling
 					occurrence, schedule.Identifier, progress.NextRun );
 		}
 
-		private static ClaimedJob ToClaimedJob( ScheduleInfo schedule, ScheduleRun run, ExecutionLease lease ) =>
+		// Both the claim and the adoption hand out a fresh lease of LeaseDuration (NewLease), which
+		// is the ClaimDuration the worker times its claim by; a renewal restarts the same duration.
+		private ClaimedJob ToClaimedJob( ScheduleInfo schedule, ScheduleRun run, ExecutionLease lease ) =>
 			new()
 			{
 				Context = new ScheduledJobContext
@@ -398,7 +408,8 @@ namespace Pug.Scheduling
 					Trigger = run.Trigger
 				},
 				Timeout = schedule.Definition.Timeout,
-				ClaimExpiry = lease.Expiry
+				ClaimExpiry = lease.Expiry,
+				ClaimDuration = _options.LeaseDuration
 			};
 
 		// == Renew ==

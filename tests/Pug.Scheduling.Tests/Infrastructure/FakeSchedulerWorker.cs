@@ -14,6 +14,7 @@ internal sealed class FakeSchedulerWorker : ISchedulerWorker
 	private readonly string? _jobType;
 
 	private volatile bool _paused;
+	private volatile string? _fault;
 
 	internal FakeSchedulerWorker( string claimant, int worker, string? jobType = null )
 	{
@@ -29,11 +30,15 @@ internal sealed class FakeSchedulerWorker : ISchedulerWorker
 			Worker = _worker,
 			JobType = _jobType!,
 			Paused = _paused,
+			Fault = _fault!,
 			LastPoll = null,
 			ActiveJobs = 0
 		};
 
 	public void Pause() => _paused = true;
+
+	// As SchedulerWorker does while the coordinator refuses its claims; independent of the pause.
+	internal void SetFault( string? fault ) => _fault = fault;
 
 	public void Resume() => _paused = false;
 }

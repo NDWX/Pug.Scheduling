@@ -19,13 +19,15 @@ namespace Pug.Scheduling.Worker
 		// The only job type the group's workers claim; null claims any type.
 		public string JobType { get; init; }
 
-		// How long to wait between polls when no work was claimed. Positive, and within
-		// TimerBounds.Maximum.
+		// How long to wait between polls when no work was claimed, after a run whose report was not
+		// recorded, and between retries of a completion report that did not get through (D29).
+		// Positive, and within TimerBounds.Maximum.
 		public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds( 10 );
 
-		// Claim-renewal cadence during job execution. Must be comfortably shorter than the
-		// coordinator's lease duration, or claims lapse mid-run and peers re-execute. Positive, and
-		// within TimerBounds.Maximum.
+		// Claim-renewal cadence during job execution. The worker caps it at a third of its window for
+		// the claim (ClaimedJob.ClaimDuration, the coordinator's lease, less
+		// SchedulerWorker.LeaseTolerance), so a longer value still leaves a renewal and a retry within
+		// each lease; shorter leaves more retries. Positive, and within TimerBounds.Maximum.
 		public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds( 30 );
 
 		// How long a stopped run's handler (timed out, claim lost, host stopping) is given to honour
@@ -35,23 +37,31 @@ namespace Pug.Scheduling.Worker
 		// host's wait for the worker.
 		public TimeSpan CancellationGrace { get; init; } = TimeSpan.FromSeconds( 10 );
 
+		// How long to wait before polling again after the coordinator refused a claim (NotAuthorized),
+		// instead of PollInterval. A refusal means a missing CLAIM_JOBS grant or a security provider
+		// failing closed, neither of which recovers within a poll interval, so a slower retry spares
+		// the coordinator and its security backend while the worker still recovers on its own. Pause,
+		// resume or the host stopping cut the wait short. Positive, and within TimerBounds.Maximum.
+		public TimeSpan RefusedPollRetryInterval { get; init; } = TimeSpan.FromMinutes( 1 );
+
 		// How many detached handlers (see CancellationGrace) each worker tolerates: at this many it
 		// stops claiming until one ends. At least 1.
 		public int MaxDetachedHandlers { get; init; } = 2;
 
 		// How long the worker waits for the coordinator to release a claim it abandons on a
 		// graceful shutdown. Best effort: past this the call is given up on (the lease then lapses
-		// on its own), so it bounds the delay this adds to the host's shutdown. Positive, and
-		// within TimerBounds.Maximum.
+		// on its own), so it bounds the delay this adds to the host's shutdown. Positive, and within
+		// TimerBounds.Maximum.
 		public TimeSpan AbandonTimeout { get; init; } = TimeSpan.FromSeconds( 5 );
 
 		/// <summary>
 		/// Throws <see cref="ArgumentException"/> (naming the offending property) unless
 		/// <see cref="Claimant"/> is neither blank nor contains '/', <see cref="Workers"/> is at
-		/// least 1, <see cref="JobType"/> is null or not blank, <see cref="PollInterval"/> and
-		/// <see cref="HeartbeatInterval"/> are positive, <see cref="CancellationGrace"/> is not
-		/// negative, <see cref="AbandonTimeout"/> is positive, each of <see cref="AbandonTimeout"/>,
-		/// <see cref="PollInterval"/>, <see cref="HeartbeatInterval"/> and
+		/// least 1, <see cref="JobType"/> is null or not blank, <see cref="PollInterval"/>,
+		/// <see cref="HeartbeatInterval"/> and <see cref="RefusedPollRetryInterval"/> are positive,
+		/// <see cref="CancellationGrace"/> is not negative, <see cref="AbandonTimeout"/> is positive,
+		/// each of <see cref="AbandonTimeout"/>, <see cref="PollInterval"/>,
+		/// <see cref="RefusedPollRetryInterval"/>, <see cref="HeartbeatInterval"/> and
 		/// <see cref="CancellationGrace"/> is within <see cref="TimerBounds.Maximum"/>, and
 		/// <see cref="MaxDetachedHandlers"/> is at least 1.
 		/// </summary>
@@ -81,8 +91,12 @@ namespace Pug.Scheduling.Worker
 			if( AbandonTimeout <= TimeSpan.Zero )
 				throw new ArgumentException( "Abandon timeout must be positive.", nameof(AbandonTimeout) );
 
+			if( RefusedPollRetryInterval <= TimeSpan.Zero )
+				throw new ArgumentException( "Refused poll retry interval must be positive.", nameof(RefusedPollRetryInterval) );
+
 			ValidateWithinTimerBounds( AbandonTimeout, nameof(AbandonTimeout) );
 			ValidateWithinTimerBounds( PollInterval, nameof(PollInterval) );
+			ValidateWithinTimerBounds( RefusedPollRetryInterval, nameof(RefusedPollRetryInterval) );
 			ValidateWithinTimerBounds( HeartbeatInterval, nameof(HeartbeatInterval) );
 			ValidateWithinTimerBounds( CancellationGrace, nameof(CancellationGrace) );
 

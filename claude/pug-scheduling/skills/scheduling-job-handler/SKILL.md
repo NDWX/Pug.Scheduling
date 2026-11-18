@@ -133,7 +133,7 @@ services.AddJobPayloadValidator<ReportPayloadValidator>( "report" );   // Pug.Sc
 - **`cancellationToken` fires** when:
   - the timeout elapses;
   - the host is stopping;
-  - the claim is lost, because a renewal was refused. Either another worker adopted the run after the lease lapsed, or the schedule was deleted.
+  - the claim is lost: a renewal answered that it is no longer held (another worker adopted the run after the lease lapsed, or the schedule was deleted), or no renewal got through for the whole lease (failed, hung or refused).
 - **After it fires, the handler has `CancellationGrace`** (a `WorkerOptions` setting, 10 s by default) to end.
 - **A handler still running after the grace is detached.** The worker stops attending it, reports `TIMED_OUT` (on a timeout) or nothing (on claim loss or shutdown), and claims new work. The detached handler runs on unattended, and is disposed when it finally ends. While it runs:
   - **it can overlap its own retry**, or a peer's re-execution of the same occurrence;
@@ -190,5 +190,5 @@ The worker runs handlers off its poll loop, outside any request, with **no ambie
 - **Exception text lands in run history.** `Error` holds the full `ToString()`, so keep secrets out of exception messages.
 - **The payload is user data.** Validate it at registration with an `IJobPayloadValidator`, and still parse it defensively in the handler: the definition can change between runs.
 - **The payload is not secret.** Anyone with `LIST` or `GET_INFO` on the schedule can read it. Put references to secrets in it, and resolve them in the handler.
-- **Alert on the worker's "failed to report completion" log.** When a report fails, the same worker adopts its own run at its next poll and executes it again, without using up an attempt. A report that keeps failing (for example, a missing `REPORT_COMPLETION` grant) re-executes the handler in a tight loop, which only idempotency keeps harmless.
+- **A report that cannot be delivered.** The worker retries it (a refused one too, for example a missing `REPORT_COMPLETION`) until the lease runs out, then drops the outcome and the run is adopted again, without using up an attempt. A **success** it could not record is remembered by occurrence and **replayed**: when the occurrence is claimed again on the same host, the outcome is reported and the handler is not run. A failure runs the handler again. The memory is per host, in memory and bounded (24 h, 1,000 entries), and a changed job type or payload runs the job, so **handlers must still be idempotent on `(Schedule, ScheduledFor)`**.
 - **There is no current user.** Code that calls `IScheduler` or other authorized services from a handler must run as the owner (or another explicit principal).

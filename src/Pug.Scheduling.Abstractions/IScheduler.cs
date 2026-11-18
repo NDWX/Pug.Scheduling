@@ -46,7 +46,7 @@ namespace Pug.Scheduling.Abstractions
 		Task UpdateDefinitionAsync( string identifier, ScheduleDefinition definition );
 
 		// Deletes the schedule and its run history. A run currently executing is not interrupted
-		// directly, but the worker's next lease renewal is refused, so the worker cancels the
+		// directly, but the worker's next lease renewal answers false, so the worker cancels the
 		// handler as a lost claim and the run's completion fails with UnknownRunException. Throws UnknownScheduleException when the
 		// schedule does not exist.
 		Task DeleteAsync( string identifier );

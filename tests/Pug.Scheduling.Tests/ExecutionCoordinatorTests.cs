@@ -207,6 +207,9 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( TimeSpan.FromMinutes( 10 ), job.Timeout );
 		Assert.Equal( Now + LeaseDuration, job.ClaimExpiry );
 
+		// What the worker times its claim by.
+		Assert.Equal( LeaseDuration, job.ClaimDuration );
+
 		ScheduleRun run = Assert.Single( await GetRunsAsync( schedule ) );
 
 		Assert.Equal( job.Context.Run, run.Identifier );
@@ -839,6 +842,50 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 	// == Adopt and renew ==
 
 	[Fact]
+	public async Task ClaimDurationIsTheConfiguredLeaseDuration()
+	{
+		TimeSpan lease = TimeSpan.FromSeconds( 45 );
+
+		string schedule = await InsertDueScheduleAsync();
+
+		ExecutionCoordinator coordinator = CreateCoordinator(
+				$"lease-{Guid.NewGuid():N}", SecurityManagerFactory.CreateWithoutPrincipal(),
+				new ExecutionCoordinatorOptions { LeaseDuration = lease } );
+
+		ClaimedJob? job = await coordinator.ClaimDueJobAsync( Claimant, 1, _jobType );
+
+		Assert.Equal( schedule, job?.Context.Schedule );
+		Assert.Equal( lease, job!.ClaimDuration );
+		Assert.Equal( Now + lease, job.ClaimExpiry );
+	}
+
+	[Theory]
+	[InlineData( 0 )]
+	[InlineData( -1 )]
+	[InlineData( 9_999 )]
+	[InlineData( 4_294_967_295 )] // TimerBounds.Maximum + 1 ms
+	public void LeaseDurationOutsideItsRangeIsRejected( long milliseconds )
+	{
+		ArgumentException exception = Assert.Throws<ArgumentException>(
+				() => CreateCoordinator(
+						"rejected", SecurityManagerFactory.CreateWithoutPrincipal(),
+						new ExecutionCoordinatorOptions { LeaseDuration = TimeSpan.FromMilliseconds( milliseconds ) } ) );
+
+		Assert.Equal( "options", exception.ParamName );
+	}
+
+	[Fact]
+	public void LeaseDurationBoundsAreAccepted()
+	{
+		Assert.Equal( TimeSpan.FromSeconds( 10 ), ExecutionCoordinatorOptions.MinimumLeaseDuration );
+
+		foreach( TimeSpan lease in new[] { ExecutionCoordinatorOptions.MinimumLeaseDuration, TimerBounds.Maximum } )
+			CreateCoordinator(
+					"accepted", SecurityManagerFactory.CreateWithoutPrincipal(),
+					new ExecutionCoordinatorOptions { LeaseDuration = lease } );
+	}
+
+	[Fact]
 	public async Task OrphanedRunOfLapsedClaimIsAdopted()
 	{
 		string schedule = await InsertDueScheduleAsync();
@@ -855,6 +902,7 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( original.Context.Run, adopted.Context.Run );
 		Assert.Equal( original.Context.Trigger, adopted.Context.Trigger );
 		Assert.Equal( Now + LeaseDuration, adopted.ClaimExpiry );
+		Assert.Equal( LeaseDuration, adopted.ClaimDuration );
 
 		// The run keeps its record; the claim on it, and its audit holder, move to the adopter.
 		ScheduleRun run = Assert.Single( await GetRunsAsync( schedule ) );

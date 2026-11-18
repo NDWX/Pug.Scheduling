@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Security.Authentication;
 using Microsoft.Extensions.Logging.Abstractions;
+using Pug.Application.Security;
 using Pug.Effable;
 using Pug.Scheduling.Abstractions;
 using Pug.Scheduling.JobHandler.Abstractions;
@@ -36,8 +39,39 @@ public class SchedulerWorkerTests
 		// The caller identity of the latest renewal.
 		public (string Claimant, int Worker)? RenewedBy { get; private set; }
 
-		// What every renewal answers; false tells the worker its claim is lost.
+		// What every renewal answers; false tells the worker its claim is lost. Ignored when
+		// OnRenew is set.
 		public bool Renews { get; init; } = true;
+
+		// Answers the n-th renewal (from 1): its result, or a failure it throws or faults with.
+		public Func<int, Task<bool>>? OnRenew { get; init; }
+
+		// Runs before the n-th report attempt (from 1) is recorded: completing records it, throwing
+		// or faulting fails the attempt, which is then not recorded.
+		public Func<int, Task>? OnReport { get; set; }
+
+		// Runs before every claim; throwing fails the claim.
+		public Action? OnClaim { get; init; }
+
+		// Hands the job last claimed back on every claim until its report is recorded, as the real
+		// coordinator adopts its holder's own unfinished run (D20).
+		public bool ReOffer { get; init; }
+
+		private ClaimedJob? _offered;
+		private int _renewals;
+		private int _reportAttempts;
+
+		public int Renewals => Volatile.Read( ref _renewals );
+
+		public int ReportAttempts => Volatile.Read( ref _reportAttempts );
+
+		// Claim attempts made by the time of each report attempt, in order.
+		public ConcurrentQueue<int> ClaimsAtReportAttempts { get; } = new();
+
+		// Stopwatch timestamps of every claim attempt and every report attempt, in order.
+		public ConcurrentQueue<long> ClaimTimes { get; } = new();
+
+		public ConcurrentQueue<long> ReportTimes { get; } = new();
 
 		// Claim attempts so far, including those that found no job.
 		public int Claims => Volatile.Read( ref _claims );
@@ -71,22 +105,40 @@ public class SchedulerWorkerTests
 
 		public Task<ClaimedJob?> ClaimDueJobAsync( string claimant, int worker, string? jobType )
 		{
-			ClaimedJob? job = _jobs.TryDequeue( out ClaimedJob? next ) ? next : null;
+			ClaimTimes.Enqueue( Stopwatch.GetTimestamp() );
 
-			if( job is not null )
-				ClaimedBy = ( claimant, worker, jobType );
+			try
+			{
+				OnClaim?.Invoke();
 
-			Interlocked.Increment( ref _claims );
-			Interlocked.Exchange( ref _claimed, Signal() ).TrySetResult();
+				ClaimedJob? offered = Volatile.Read( ref _offered );
 
-			return Task.FromResult( job );
+				ClaimedJob? job = ReOffer && offered is not null && !ReportOf( offered.Context.Run ).IsCompleted
+									? offered
+									: _jobs.TryDequeue( out ClaimedJob? next ) ? next : null;
+
+				if( job is not null )
+				{
+					ClaimedBy = ( claimant, worker, jobType );
+					Volatile.Write( ref _offered, job );
+				}
+
+				return Task.FromResult( job );
+			}
+			finally
+			{
+				Interlocked.Increment( ref _claims );
+				Interlocked.Exchange( ref _claimed, Signal() ).TrySetResult();
+			}
 		}
 
 		public Task<bool> RenewClaimAsync( string run, string claimant, int worker )
 		{
 			RenewedBy = ( claimant, worker );
 
-			return Task.FromResult( Renews );
+			int renewal = Interlocked.Increment( ref _renewals );
+
+			return OnRenew is null ? Task.FromResult( Renews ) : OnRenew( renewal );
 		}
 
 		// Runs the worker asked to abandon, in order.
@@ -102,14 +154,20 @@ public class SchedulerWorkerTests
 			return OnAbandon();
 		}
 
-		public Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
+		public async Task ReportCompletionAsync( string run, string claimant, int worker, string result, JobOutcome outcome )
 		{
+			ClaimsAtReportAttempts.Enqueue( Claims );
+			ReportTimes.Enqueue( Stopwatch.GetTimestamp() );
+
+			int attempt = Interlocked.Increment( ref _reportAttempts );
+
+			if( OnReport is not null )
+				await OnReport( attempt );
+
 			ReportedBy = ( claimant, worker );
 
 			Reported.TrySetResult( ( run, result, outcome ) );
 			ReportSignal( run ).TrySetResult( ( result, outcome ) );
-
-			return Task.CompletedTask;
 		}
 	}
 
@@ -126,7 +184,15 @@ public class SchedulerWorkerTests
 
 	private static TaskCompletionSource Signal() => new( TaskCreationOptions.RunContinuationsAsynchronously );
 
-	private static ClaimedJob NewJob( TimeSpan? timeout = null, string run = "run-1" ) =>
+	private static long _lastOccurrence;
+
+	// A distinct occurrence per call unless one is given: jobs of one test share schedule-1, and two
+	// jobs of the same occurrence would replay each other's remembered success (D29).
+	private static DateTime NextOccurrence() =>
+		new DateTime( 2030, 1, 1, 0, 0, 0, DateTimeKind.Utc ).AddSeconds( Interlocked.Increment( ref _lastOccurrence ) );
+
+	private static ClaimedJob NewJob( TimeSpan? timeout = null, string run = "run-1", TimeSpan? claimDuration = null,
+									DateTime? scheduledFor = null, string? payload = null ) =>
 		new()
 		{
 			Context = new ScheduledJobContext
@@ -136,12 +202,14 @@ public class SchedulerWorkerTests
 				Domain = "tenant-1",
 				Owner = new Reference { Type = "USER", Identifier = "owner-1" },
 				JobType = "test",
-				ScheduledFor = DateTime.UtcNow,
+				Payload = payload!,
+				ScheduledFor = scheduledFor ?? NextOccurrence(),
 				Attempt = 0,
 				Trigger = RunTriggers.Schedule
 			},
 			Timeout = timeout ?? TimeSpan.FromSeconds( 30 ),
-			ClaimExpiry = DateTime.UtcNow.AddMinutes( 2 )
+			ClaimExpiry = DateTime.UtcNow.AddMinutes( 2 ),
+			ClaimDuration = claimDuration ?? TimeSpan.FromMinutes( 2 )
 		};
 
 	private static WorkerOptions FastOptions( int maxDetachedHandlers = 2, int graceMilliseconds = 100 ) =>
@@ -155,12 +223,14 @@ public class SchedulerWorkerTests
 		};
 
 	private static SchedulerWorker NewWorker( FakeCoordinator coordinator, IScheduledJobHandlerFactoryRegistry registry,
-											WorkerOptions? options = null, int number = 1 ) =>
+											WorkerOptions? options = null, int number = 1,
+											UnrecordedSuccesses? unrecordedSuccesses = null ) =>
 		new( coordinator, registry,
 			options ?? new WorkerOptions { Claimant = "test-worker", PollInterval = TimeSpan.FromMilliseconds( 50 ) },
 			number,
 			TimeProvider.System,
-			NullLogger<SchedulerWorker>.Instance );
+			NullLogger<SchedulerWorker>.Instance,
+			unrecordedSuccesses );
 
 	private static async Task<(string Run, string Result, JobOutcome Outcome)> RunWorkerAsync(
 		FakeCoordinator coordinator, IScheduledJobHandlerFactoryRegistry registry, WorkerOptions? options = null,
@@ -1044,6 +1114,7 @@ public class SchedulerWorkerTests
 		Assert.Equal( TimeSpan.FromSeconds( 10 ), options.CancellationGrace );
 		Assert.Equal( 2, options.MaxDetachedHandlers );
 		Assert.Equal( TimeSpan.FromSeconds( 5 ), options.AbandonTimeout );
+		Assert.Equal( TimeSpan.FromMinutes( 1 ), options.RefusedPollRetryInterval );
 
 		options.Validate();
 	}
@@ -1102,6 +1173,8 @@ public class SchedulerWorkerTests
 			nameof(WorkerOptions.PollInterval) => new WorkerOptions { Claimant = "host", PollInterval = value },
 			nameof(WorkerOptions.HeartbeatInterval) => new WorkerOptions { Claimant = "host", HeartbeatInterval = value },
 			nameof(WorkerOptions.CancellationGrace) => new WorkerOptions { Claimant = "host", CancellationGrace = value },
+			nameof(WorkerOptions.RefusedPollRetryInterval) =>
+				new WorkerOptions { Claimant = "host", RefusedPollRetryInterval = value },
 			_ => throw new ArgumentOutOfRangeException( nameof(property) )
 		};
 
@@ -1110,6 +1183,8 @@ public class SchedulerWorkerTests
 	[InlineData( nameof(WorkerOptions.PollInterval), -1 )]
 	[InlineData( nameof(WorkerOptions.HeartbeatInterval), 0 )]
 	[InlineData( nameof(WorkerOptions.HeartbeatInterval), -1 )]
+	[InlineData( nameof(WorkerOptions.RefusedPollRetryInterval), 0 )]
+	[InlineData( nameof(WorkerOptions.RefusedPollRetryInterval), -1 )]
 	public void NonPositiveIntervalsAreRejected( string property, int milliseconds )
 	{
 		ArgumentException exception = Assert.Throws<ArgumentException>(
@@ -1122,6 +1197,7 @@ public class SchedulerWorkerTests
 	[InlineData( nameof(WorkerOptions.PollInterval) )]
 	[InlineData( nameof(WorkerOptions.HeartbeatInterval) )]
 	[InlineData( nameof(WorkerOptions.CancellationGrace) )]
+	[InlineData( nameof(WorkerOptions.RefusedPollRetryInterval) )]
 	public void DurationsBeyondTheTimerBoundAreRejectedAndTheBoundIsAccepted( string property )
 	{
 		WithDuration( property, TimerBounds.Maximum ).Validate();
@@ -1144,5 +1220,886 @@ public class SchedulerWorkerTests
 	public void ZeroGraceAndOneDetachedHandlerAreAccepted()
 	{
 		new WorkerOptions { Claimant = "host", CancellationGrace = TimeSpan.Zero, MaxDetachedHandlers = 1 }.Validate();
+	}
+
+	// ===== The claim's lifecycle (D29) =====
+
+	// The shortest claim the worker accepts (MinimumClaimDuration): a 0.5 s window after
+	// LeaseTolerance.
+	private static readonly TimeSpan ShortClaim = TimeSpan.FromSeconds( 1 );
+
+	// A handler that succeeds after the given time, counting its executions.
+	private static DelegateJobHandler Counting( Func<int> onStart, TimeSpan? duration = null ) =>
+		new( async ( _, _, cancellationToken ) =>
+		{
+			onStart();
+
+			if( duration is not null )
+				await Task.Delay( duration.Value, cancellationToken );
+
+			return new JobOutcome { Successful = true };
+		} );
+
+	// A coordinator failure of each kind the worker retries: a refusal is one of them (D29).
+	private static Exception Failure( string failure ) =>
+		failure switch
+		{
+			"refused" => new NotAuthorized(),
+			"unauthenticated" => new AuthenticationException(),
+			"network" => new HttpRequestException( "unreachable" ),
+			_ => new ArgumentException( "bad stored data", "run" )
+		};
+
+	[Theory]
+	[InlineData( "refused" )]
+	[InlineData( "unauthenticated" )]
+	[InlineData( "network" )]
+	[InlineData( "argument" )]
+	public async Task RenewalsFailingForTheWholeLeaseLoseTheClaimWithoutPausing( string failure )
+	{
+		Exception exception = Failure( failure );
+
+		TaskCompletionSource cancelled = Signal();
+
+		FakeCoordinator coordinator = new( NewJob( claimDuration: ShortClaim ) )
+		{
+			OnRenew = _ => Task.FromException<bool>( exception )
+		};
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Cooperative( Signal(), cancelled ) ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		Stopwatch elapsed = Stopwatch.StartNew();
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await cancelled.Task.WaitAsync( Bound );
+
+			// Not before the worker's deadline: ClaimDuration less the tolerance, from the claim.
+			Assert.True( elapsed.Elapsed >= ShortClaim - SchedulerWorker.LeaseTolerance - TimeSpan.FromMilliseconds( 50 ),
+						$"Claim lost after {elapsed.Elapsed}." );
+
+			// The pump moves on; a lapsed claim is neither reported, released nor a fault.
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			Assert.True( coordinator.Renewals > 1 );
+			Assert.Equal( 0, coordinator.ReportAttempts );
+			Assert.Empty( coordinator.Abandoned );
+			Assert.False( worker.GetInfo().Paused );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Theory]
+	[InlineData( "refused" )]
+	[InlineData( "network" )]
+	public async Task RenewalsFailingAndThenConfirmedKeepTheRun( string failure )
+	{
+		TaskCompletionSource renewedAfterFailures = Signal();
+
+		// Three failures within the window (the 20 ms beat), then a confirmed renewal.
+		FakeCoordinator coordinator = new( NewJob( claimDuration: TimeSpan.FromSeconds( 3 ) ) )
+		{
+			OnRenew = renewal =>
+			{
+				if( renewal <= 3 )
+					return Task.FromException<bool>( Failure( failure ) );
+
+				renewedAfterFailures.TrySetResult();
+
+				return Task.FromResult( true );
+			}
+		};
+
+		// Ends once the claim has come through the failures, so its outcome is reported under it.
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					await renewedAfterFailures.Task.WaitAsync( cancellationToken );
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.True( coordinator.Renewals > 3 );
+			Assert.Empty( coordinator.Abandoned );
+			Assert.False( worker.GetInfo().Paused );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task AHangingRenewalLosesTheClaimAtTheDeadlineAndDoesNotDelayTheDetach()
+	{
+		TaskCompletionSource release = Signal();
+
+		FakeCoordinator coordinator = new( NewJob( claimDuration: ShortClaim ) )
+		{
+			OnRenew = _ => new TaskCompletionSource<bool>().Task
+		};
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( Hanging( release ) ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			// The handler ignores cancellation, so it is detached after the grace; the heartbeat,
+			// stuck in its first renewal, must neither keep the run going nor hold up the detach.
+			await WaitUntilAsync( () => worker.GetInfo().DetachedJobs == 1 );
+
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			Assert.Equal( 1, coordinator.Renewals );
+			Assert.Equal( 0, coordinator.ReportAttempts );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			release.TrySetResult();
+
+			// Bounded: a heartbeat stuck in the renewal would otherwise hang the test run.
+			await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+		}
+	}
+
+	[Fact]
+	public async Task SuccessfulRenewalsCarryARunPastSeveralLeases()
+	{
+		FakeCoordinator coordinator = new( NewJob( claimDuration: TimeSpan.FromSeconds( 2 ) ) );
+
+		// Over two and a half times the worker's 1.5 s window for the claim.
+		( _, string result, _ ) = await RunWorkerAsync(
+				coordinator, Registry( Counting( () => 0, TimeSpan.FromSeconds( 4 ) ) ), FastOptions() );
+
+		Assert.Equal( RunResults.Succeeded, result );
+	}
+
+	[Fact]
+	public async Task TheBeatIsCappedAtAThirdOfTheWorkersWindow()
+	{
+		// A 2.5 s window: a beat of about 0.83 s, where half the window would be 1.25 s.
+		FakeCoordinator coordinator = new( NewJob( claimDuration: TimeSpan.FromSeconds( 3 ) ) );
+
+		// A HeartbeatInterval far beyond the lease would never renew in time uncapped. Over 5 s, a
+		// third-of-window beat renews five or six times (the fifth at about 4.2 s), a half-window one
+		// at most four.
+		( _, string result, _ ) = await RunWorkerAsync(
+				coordinator, Registry( Counting( () => 0, TimeSpan.FromSeconds( 5 ) ) ),
+				FastOptions() with { HeartbeatInterval = TimeSpan.FromMinutes( 1 ) } );
+
+		Assert.Equal( RunResults.Succeeded, result );
+		Assert.True( coordinator.Renewals >= 5, $"{coordinator.Renewals} renewal(s)." );
+	}
+
+	[Theory]
+	[InlineData( 0 )]
+	[InlineData( 500 )]
+	[InlineData( 999 )]
+	[InlineData( -1 )]
+	public async Task AClaimDurationTheWorkerCannotTimeFailsTheRunUnexecuted( int milliseconds )
+	{
+		int executions = 0;
+
+		FakeCoordinator coordinator = new( NewJob( claimDuration: TimeSpan.FromMilliseconds( milliseconds ) ) );
+
+		( _, string result, JobOutcome outcome ) = await RunWorkerAsync(
+				coordinator, Registry( Counting( () => Interlocked.Increment( ref executions ) ) ), FastOptions() );
+
+		Assert.Equal( RunResults.Failed, result );
+		Assert.Contains( "outside the range the worker can time", outcome.Error );
+		Assert.Equal( 0, executions );
+		Assert.Equal( 1, coordinator.ReportAttempts );
+	}
+
+	[Fact]
+	public async Task AClaimDurationBeyondTheTimerBoundFailsTheRunUnexecuted()
+	{
+		int executions = 0;
+
+		FakeCoordinator coordinator = new(
+				NewJob( claimDuration: TimerBounds.Maximum + TimeSpan.FromMilliseconds( 1 ) ) );
+
+		( _, string result, _ ) = await RunWorkerAsync(
+				coordinator, Registry( Counting( () => Interlocked.Increment( ref executions ) ) ), FastOptions() );
+
+		Assert.Equal( RunResults.Failed, result );
+		Assert.Equal( 0, executions );
+	}
+
+	[Theory]
+	[InlineData( "claim not held" )]
+	[InlineData( "unknown run" )]
+	public async Task ACompletionForAClaimNoLongerHeldIsNotRetried( string failure )
+	{
+		FakeCoordinator coordinator = new( NewJob() )
+		{
+			OnReport = _ => throw ( failure == "unknown run"
+										? new UnknownRunException( "run-1" )
+										: new ClaimNotHeldException( "run-1" ) )
+		};
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( Succeeding() ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await coordinator.ClaimsReachedAsync( 3 ).WaitAsync( Bound );
+
+			Assert.Equal( 1, coordinator.ReportAttempts );
+			Assert.Empty( coordinator.Abandoned );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task StoppingTheHostEndsCompletionRetriesPromptly()
+	{
+		FakeCoordinator coordinator = new( NewJob() )
+		{
+			OnReport = _ => throw new HttpRequestException( "unreachable" )
+		};
+
+		// Without the host stopping, retries would go on for the 2-minute claim.
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ), FastOptions() with { PollInterval = TimeSpan.FromSeconds( 30 ) } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		await WaitUntilAsync( () => coordinator.ReportAttempts >= 1 );
+
+		await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		Assert.Equal( 1, coordinator.ReportAttempts );
+		Assert.Empty( coordinator.Abandoned );
+	}
+
+	[Fact]
+	public void OperatorPauseSetsNoFault()
+	{
+		using SchedulerWorker worker = NewWorker( new FakeCoordinator(), Registry( Succeeding() ), FastOptions() );
+
+		worker.Pause();
+
+		Assert.True( worker.GetInfo().Paused );
+		Assert.Null( worker.GetInfo().Fault );
+	}
+
+	[Theory]
+	[InlineData( "not held" )]
+	[InlineData( "unusable claim" )]
+	public async Task ARunWhoseReportWasNotRecordedDelaysTheNextClaimByThePollInterval( string failure )
+	{
+		TimeSpan pollInterval = TimeSpan.FromMilliseconds( 400 );
+
+		// "unusable claim": a claim the worker cannot time, whose one report does not get through
+		// — re-offered, as the real coordinator would hand its holder the same run again.
+		FakeCoordinator coordinator = failure == "not held"
+										? new( NewJob() ) { OnReport = _ => throw new ClaimNotHeldException( "run-1" ) }
+										: new( NewJob( claimDuration: TimeSpan.Zero ) )
+										{
+											ReOffer = true,
+											OnReport = _ => throw new HttpRequestException( "unreachable" )
+										};
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ), FastOptions() with { PollInterval = pollInterval } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			TimeSpan gap = Stopwatch.GetElapsedTime( coordinator.ReportTimes.First(), coordinator.ClaimTimes.ElementAt( 1 ) );
+
+			// One attempt for the first run, not retried (the second run may have reported since).
+			Assert.Single( coordinator.ClaimsAtReportAttempts, claims => claims == 1 );
+			Assert.True( gap >= pollInterval - TimeSpan.FromMilliseconds( 50 ), $"Claimed again after {gap}." );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ARecordedReportIsFollowedByAnImmediateClaim()
+	{
+		FakeCoordinator coordinator = new( NewJob(), NewJob( run: "next" ) );
+
+		// Waiting a poll interval after the first run would miss the bound.
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ), FastOptions() with { PollInterval = TimeSpan.FromMinutes( 1 ) } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "next" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Theory]
+	[InlineData( "refused" )]
+	[InlineData( "network" )]
+	public async Task AReportThatFailsAndThenGetsThroughIsRecordedWithoutClaimingInBetween( string failure )
+	{
+		int executions = 0;
+
+		// Re-offered as the real coordinator would: the row still names this worker as holder.
+		FakeCoordinator coordinator = new( NewJob() )
+		{
+			ReOffer = true,
+			OnReport = attempt => attempt <= 2 ? throw Failure( failure ) : Task.CompletedTask
+		};
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Counting( () => Interlocked.Increment( ref executions ) ) ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.Equal( 1, executions );
+			Assert.Equal( 3, coordinator.ReportAttempts );
+
+			// Every attempt came after the one claim and before any other.
+			Assert.Equal( [ 1, 1, 1 ], coordinator.ClaimsAtReportAttempts.ToArray() );
+			Assert.Empty( coordinator.Abandoned );
+			Assert.False( worker.GetInfo().Paused );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ARefusedClaimIsRetriedAtTheRefusedPollRetryIntervalWithTheFaultShown()
+	{
+		TimeSpan retryInterval = TimeSpan.FromMilliseconds( 500 );
+
+		FakeCoordinator coordinator = new( NewJob() ) { OnClaim = () => throw new NotAuthorized() };
+
+		// PollInterval is 20 ms: a refused worker must not poll at it.
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ), FastOptions() with { RefusedPollRetryInterval = retryInterval } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await WaitUntilAsync( () => worker.GetInfo().Fault is not null );
+
+			WorkerInfo info = worker.GetInfo();
+
+			Assert.Equal( WorkerFaults.ClaimRefused, info.Fault );
+			Assert.False( info.Paused );
+
+			await coordinator.ClaimsReachedAsync( 3 ).WaitAsync( Bound );
+
+			long[] claims = coordinator.ClaimTimes.ToArray();
+
+			for( int claim = 1; claim < 3; claim++ )
+			{
+				TimeSpan gap = Stopwatch.GetElapsedTime( claims[claim - 1], claims[claim] );
+
+				Assert.True( gap >= retryInterval - TimeSpan.FromMilliseconds( 50 ), $"Claimed again after {gap}." );
+			}
+
+			Assert.Equal( WorkerFaults.ClaimRefused, worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ResumeCutsTheRefusedWaitShortAndAnAnsweredClaimClearsTheFault()
+	{
+		bool refusing = true;
+
+		FakeCoordinator coordinator = new( NewJob() )
+		{
+			OnClaim = () =>
+			{
+				if( Volatile.Read( ref refusing ) )
+					throw new NotAuthorized();
+			}
+		};
+
+		// A retry interval far beyond the test's bound: only the state change can end the wait.
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ),
+				FastOptions() with { RefusedPollRetryInterval = TimeSpan.FromMinutes( 5 ) } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await WaitUntilAsync( () => worker.GetInfo().Fault is not null );
+
+			// The grant lands; an operator nudges the worker rather than waiting the interval out.
+			Volatile.Write( ref refusing, false );
+
+			worker.Pause();
+			worker.Resume();
+
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task AClaimFailingOtherwiseIsRetriedAtThePollIntervalWithoutAFault()
+	{
+		FakeCoordinator coordinator = new() { OnClaim = () => throw new HttpRequestException( "unreachable" ) };
+
+		// The default RefusedPollRetryInterval (1 min) would miss the bound.
+		SchedulerWorker worker = NewWorker( coordinator, Registry( Succeeding() ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await coordinator.ClaimsReachedAsync( 3 ).WaitAsync( Bound );
+
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Theory]
+	[InlineData( "refused" )]
+	[InlineData( "network" )]
+	public async Task AReportThatNeverGetsThroughIsDroppedAtTheLeaseDeadline( string failure )
+	{
+		FakeCoordinator coordinator = new( NewJob( claimDuration: ShortClaim ) )
+		{
+			OnReport = _ => throw Failure( failure )
+		};
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( Succeeding() ), FastOptions() );
+
+		Stopwatch elapsed = Stopwatch.StartNew();
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			// The pump polls again only once the report is given up on.
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			Assert.True( elapsed.Elapsed >= ShortClaim - SchedulerWorker.LeaseTolerance - TimeSpan.FromMilliseconds( 50 ),
+						$"Given up after {elapsed.Elapsed}." );
+
+			Assert.True( coordinator.ReportAttempts > 1 );
+			Assert.Equal( 0, coordinator.Reports );
+			Assert.Empty( coordinator.Abandoned );
+			Assert.False( worker.GetInfo().Paused );
+			Assert.Null( worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task TheReportWindowIgnoresTheTimeout()
+	{
+		Stopwatch sinceFirstAttempt = new();
+
+		// A 1 s timeout under a 2-minute claim: the report keeps failing until well past the timeout.
+		FakeCoordinator coordinator = new( NewJob( timeout: TimeSpan.FromSeconds( 1 ) ) )
+		{
+			OnReport = _ =>
+			{
+				sinceFirstAttempt.Start();
+
+				return sinceFirstAttempt.Elapsed < TimeSpan.FromSeconds( 1.5 )
+							? throw new HttpRequestException( "unreachable" )
+							: Task.CompletedTask;
+			}
+		};
+
+		( _, string result, _ ) = await RunWorkerAsync( coordinator, Registry( Succeeding() ), FastOptions() );
+
+		Assert.Equal( RunResults.Succeeded, result );
+		Assert.True( coordinator.ReportAttempts > 2 );
+	}
+
+	[Theory]
+	[InlineData( "refused" )]
+	[InlineData( "network" )]
+	public async Task ATimedOutReportIsRetriedUntilTheLeaseDeadline( string failure )
+	{
+		TaskCompletionSource release = Signal();
+
+		// Ignores cancellation, so it is detached and reported TIMED_OUT, past its timeout and well
+		// inside the claim's 0.5 s window.
+		FakeCoordinator coordinator = new( NewJob( timeout: TimeSpan.FromMilliseconds( 100 ), claimDuration: ShortClaim ) )
+		{
+			OnReport = _ => throw Failure( failure )
+		};
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( Hanging( release ) ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await coordinator.ClaimsReachedAsync( 2 ).WaitAsync( Bound );
+
+			Assert.True( coordinator.ReportAttempts > 1, $"{coordinator.ReportAttempts} attempt(s)." );
+			Assert.Equal( 1, worker.GetInfo().DetachedJobs );
+
+			// A detached handler's claim is never released (D27), refused or not.
+			Assert.Empty( coordinator.Abandoned );
+		}
+		finally
+		{
+			release.TrySetResult();
+
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	// Fails every report attempt made under the first claim; later claims' reports get through.
+	private static void FailReportsOfTheFirstClaim( FakeCoordinator coordinator ) =>
+		coordinator.OnReport = _ => coordinator.Claims == 1
+										? throw new HttpRequestException( "unreachable" )
+										: Task.CompletedTask;
+
+	[Fact]
+	public async Task ADroppedSuccessIsReplayedWhenItsOccurrenceIsClaimedAgain()
+	{
+		int executions = 0;
+
+		UnrecordedSuccesses store = new();
+
+		// Re-offered as the real coordinator would: the row still names this worker as holder.
+		ClaimedJob job = NewJob( claimDuration: ShortClaim );
+
+		FakeCoordinator coordinator = new( job ) { ReOffer = true };
+
+		FailReportsOfTheFirstClaim( coordinator );
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Counting( () => Interlocked.Increment( ref executions ) ) ), FastOptions(),
+				unrecordedSuccesses: store );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.Equal( 1, executions );
+
+			// Recorded under the second claim, then forgotten.
+			Assert.Equal( 2, coordinator.ClaimsAtReportAttempts.Last() );
+
+			await WaitUntilAsync( () => !store.TryGet( job.Context, out _, out _ ) );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ASuccessDroppedByOneWorkerIsReplayedByAnotherSharingTheStore()
+	{
+		int executions = 0;
+
+		UnrecordedSuccesses store = new();
+
+		ClaimedJob job = NewJob( claimDuration: ShortClaim );
+
+		FakeCoordinator coordinator = new( job ) { ReOffer = true };
+
+		FailReportsOfTheFirstClaim( coordinator );
+
+		SingleFactoryRegistry registry = Registry( Counting( () => Interlocked.Increment( ref executions ) ) );
+
+		// Worker 1 drops its report at the deadline, then waits a long PollInterval, so the next
+		// claim is worker 2's.
+		SchedulerWorker first = NewWorker(
+				coordinator, registry, FastOptions() with { PollInterval = TimeSpan.FromMinutes( 1 ) }, 1, store );
+
+		await first.StartAsync( CancellationToken.None );
+
+		await WaitUntilAsync( () => store.TryGet( job.Context, out _, out _ ) );
+
+		await first.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		SchedulerWorker second = NewWorker( coordinator, registry, FastOptions(), 2, store );
+
+		await second.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.Equal( 1, executions );
+			Assert.Equal( ( "test-worker", 2 ), coordinator.ReportedBy );
+		}
+		finally
+		{
+			await second.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Theory]
+	[InlineData( "failed" )]
+	[InlineData( "timed out" )]
+	public async Task ADroppedFailureIsExecutedAgainNotReplayed( string outcome )
+	{
+		int executions = 0;
+
+		// A handler that fails, or one that runs past its 100 ms timeout and honours cancellation.
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					Interlocked.Increment( ref executions );
+
+					if( outcome == "timed out" )
+						await Task.Delay( Timeout.InfiniteTimeSpan, cancellationToken );
+
+					return new JobOutcome { Successful = false, Error = "failed" };
+				} );
+
+		FakeCoordinator coordinator = new( NewJob( timeout: TimeSpan.FromMilliseconds( 100 ), claimDuration: ShortClaim ) )
+		{
+			ReOffer = true
+		};
+
+		FailReportsOfTheFirstClaim( coordinator );
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( outcome == "failed" ? RunResults.Failed : RunResults.TimedOut, result );
+			Assert.Equal( 2, executions );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Theory]
+	[InlineData( "same definition" )]
+	[InlineData( "changed payload" )]
+	public async Task TheSameOccurrenceUnderANewRunIsReplayedUnlessItsDefinitionChanged( string definition )
+	{
+		int executions = 0;
+
+		DateTime occurrence = NextOccurrence();
+
+		// A retry of the same occurrence after a peer's failure: another run, the same ScheduledFor.
+		FakeCoordinator coordinator = new(
+				NewJob( run: "run-1", claimDuration: ShortClaim, scheduledFor: occurrence, payload: "a" ),
+				NewJob( run: "run-2", scheduledFor: occurrence,
+						payload: definition == "same definition" ? "a" : "b" ) );
+
+		FailReportsOfTheFirstClaim( coordinator );
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Counting( () => Interlocked.Increment( ref executions ) ) ), FastOptions() );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-2" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.Equal( definition == "same definition" ? 1 : 2, executions );
+			Assert.False( coordinator.ReportOf( "run-1" ).IsCompleted );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task ASuccessCompletedAfterTheClaimWasLostIsReplayed()
+	{
+		int executions = 0;
+
+		// Notices the cancellation but ends successfully, within the grace: the work was done.
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					Interlocked.Increment( ref executions );
+
+					try
+					{
+						await Task.Delay( Timeout.InfiniteTimeSpan, cancellationToken );
+					}
+					catch( OperationCanceledException )
+					{
+					}
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		// The first renewal answers "no longer held"; the replay needs no renewal.
+		FakeCoordinator coordinator = new( NewJob() ) { ReOffer = true, Renews = false };
+
+		SchedulerWorker worker = NewWorker( coordinator, Registry( handler ), FastOptions( graceMilliseconds: 10_000 ) );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			( string result, _ ) = await coordinator.ReportOf( "run-1" ).WaitAsync( Bound );
+
+			Assert.Equal( RunResults.Succeeded, result );
+			Assert.Equal( 1, executions );
+			Assert.Equal( 1, coordinator.ReportAttempts );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task RefusedRenewalsThenARunEndingInsideTheWindowIsReported()
+	{
+		TaskCompletionSource refused = Signal();
+
+		FakeCoordinator coordinator = new( NewJob( claimDuration: TimeSpan.FromSeconds( 3 ) ) )
+		{
+			OnRenew = _ =>
+			{
+				refused.TrySetResult();
+
+				return Task.FromException<bool>( new NotAuthorized() );
+			}
+		};
+
+		// Ends after its first renewal was refused, well inside the 2.5 s window.
+		DelegateJobHandler handler = new(
+				async ( _, _, cancellationToken ) =>
+				{
+					await refused.Task.WaitAsync( cancellationToken );
+
+					return new JobOutcome { Successful = true };
+				} );
+
+		( _, string result, _ ) = await RunWorkerAsync( coordinator, Registry( handler ), FastOptions() );
+
+		Assert.Equal( RunResults.Succeeded, result );
+		Assert.True( coordinator.Renewals >= 1 );
+		Assert.Empty( coordinator.Abandoned );
+	}
+
+	[Fact]
+	public async Task AnotherClaimFailureAfterARefusalKeepsTheFault()
+	{
+		int claims = 0;
+
+		// Refused once, then unreachable: not an answer, so the refusal still stands.
+		FakeCoordinator coordinator = new()
+		{
+			OnClaim = () =>
+			{
+				if( Interlocked.Increment( ref claims ) == 1 )
+					throw new NotAuthorized();
+
+				throw new HttpRequestException( "unreachable" );
+			}
+		};
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ),
+				FastOptions() with { RefusedPollRetryInterval = TimeSpan.FromMilliseconds( 50 ) } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		try
+		{
+			await coordinator.ClaimsReachedAsync( 3 ).WaitAsync( Bound );
+
+			Assert.Equal( WorkerFaults.ClaimRefused, worker.GetInfo().Fault );
+		}
+		finally
+		{
+			await worker.StopAsync( CancellationToken.None );
+		}
+	}
+
+	[Fact]
+	public async Task StoppingTheHostCutsTheRefusedClaimWaitShort()
+	{
+		FakeCoordinator coordinator = new() { OnClaim = () => throw new NotAuthorized() };
+
+		SchedulerWorker worker = NewWorker(
+				coordinator, Registry( Succeeding() ),
+				FastOptions() with { RefusedPollRetryInterval = TimeSpan.FromMinutes( 5 ) } );
+
+		await worker.StartAsync( CancellationToken.None );
+
+		await WaitUntilAsync( () => worker.GetInfo().Fault is not null );
+
+		// Returns well within the bound, not after the 5-minute interval.
+		await worker.StopAsync( CancellationToken.None ).WaitAsync( Bound );
+
+		Assert.Equal( 1, coordinator.Claims );
 	}
 }

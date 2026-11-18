@@ -146,7 +146,7 @@ An exhausted schedule is kept, with its history. It runs again only through run-
 ### Pause, resume and delete
 
 - **Pause** stops new claims of the schedule: occurrences, retries, run-now and adoption of a crashed run all wait. **Resume** only lifts the pause. The next claim applies the misfire policy to whatever elapsed meanwhile, so a long pause under `FIRE_ONCE` produces one `MISFIRE` run.
-- **Delete** removes the schedule and all its runs at once. A run in progress is not stopped by the call, but its worker's next heartbeat is refused, so the handler is cancelled as a lost claim, and its completion is recorded nowhere.
+- **Delete** removes the schedule and all its runs at once. A run in progress is not stopped by the call, but its worker's next heartbeat answers that the claim is no longer held, so the handler is cancelled as a lost claim, and its completion is recorded nowhere.
 
 ### Run now
 

@@ -48,8 +48,25 @@ namespace Pug.Scheduling.Models
 #endif
 		}
 
+		// Whether an operator paused the worker's claiming. A worker never pauses itself.
 		[Required, DataMember( IsRequired = true )]
 		public bool Paused
+		{
+			get;
+#if NET5_0_OR_GREATER
+			init;
+#else
+			set;
+#endif
+		}
+
+		// Why the coordinator is refusing the worker (a WorkerFaults value); null when it is not.
+		// Independent of Paused: the worker keeps retrying, and the fault clears by itself once the
+		// coordinator answers again. It reflects the last claim answered or refused, dated by
+		// LastPoll, so it may stay set while the worker is paused or at its detached limit and not
+		// polling.
+		[DataMember]
+		public string Fault
 		{
 			get;
 #if NET5_0_OR_GREATER

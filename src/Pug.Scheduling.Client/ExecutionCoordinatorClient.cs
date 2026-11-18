@@ -58,6 +58,8 @@ public class ExecutionCoordinatorClient : ApiClient, IExecutionCoordinator
 									)
 									.ConfigureAwait( false );
 
+					ApiFailures.EnsureSuccess( response );
+
 					// 204: nothing is due — the coordinator's null, not a failure.
 					if( response.StatusCode == HttpStatusCode.NoContent )
 						return null;
@@ -97,6 +99,8 @@ public class ExecutionCoordinatorClient : ApiClient, IExecutionCoordinator
 											queries: CallerQuery( claimant, worker )
 										)
 										.ConfigureAwait( false );
+
+						ApiFailures.EnsureSuccess( response );
 					}
 					catch( HttpApiRequestException exception ) when( exception.ResponseStatusCode == HttpStatusCode.Conflict )
 					{

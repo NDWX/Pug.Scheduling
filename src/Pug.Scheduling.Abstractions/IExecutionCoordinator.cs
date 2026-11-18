@@ -23,17 +23,41 @@ namespace Pug.Scheduling.Abstractions
 	// transport bound to this interface on the scheduler side — a host's own controller, a gRPC
 	// service, a message consumer — must establish the caller's principal before calling it, or
 	// every coordinator grant is skipped for its callers.
+	//
+	// FAILURES, as a worker must read them (D29). Three kinds, and only the first is about the caller:
+	// - Refused: NotAuthorized (Pug.Application.Security; 403 over HTTP). The caller's claimant lacks
+	//   the operation's CoordinatorSecurityOperations grant — or the security provider is failing
+	//   closed while its backend is down, which reads the same. It concerns the caller, not the run.
+	//   SchedulerWorker therefore treats a refused renewal or report as unconfirmed (retried within
+	//   the lease), and a refused claim as a reason to poll more slowly; it never pauses itself.
+	// - Not held: RenewClaimAsync/AbandonClaimAsync answering false, ClaimNotHeldException,
+	//   UnknownRunException. The claim is gone (lapsed and adopted, finished, deleted); normal at run
+	//   level, and nothing the caller does will bring it back.
+	// - Unconfirmed: anything else — AuthenticationException (401: a token may refresh), a server or
+	//   transport failure, a timeout, ArgumentException or InvalidOperationException (one schedule's
+	//   bad stored data must not be read as the caller's fault). The call may or may not have taken
+	//   effect; the claim stands until its lease lapses.
+	//
+	// TIMEOUTS. A worker bounds its renewals by its claim's deadline, but not a single completion
+	// report: an implementation must keep every call finite — an HTTP transport by its client's
+	// timeout (HttpClient's default is 100 s), a database by its command and lock timeouts (Npgsql's
+	// command timeout, 30 s by default; SQLite's busy timeout). A hung call holds its worker, and
+	// a host's shutdown budget must allow for one report attempt in flight.
 	public interface IExecutionCoordinator
 	{
 		// Atomically claims one due occurrence for the calling worker and returns it with its
 		// execution parameters, or null when nothing is due. jobType restricts the claim to that
 		// job type; null claims any type. A claimed occurrence is excluded from other workers
-		// until its lease expires or its completion is reported.
+		// until its lease expires or its completion is reported. The claim stands for
+		// ClaimedJob.ClaimDuration from the call unless renewed; the caller's own unfinished run is
+		// handed back to it (adopted) even while its lease is live, so a worker must not poll again
+		// while it still holds a claim it means to keep or report.
 		Task<ClaimedJob> ClaimDueJobAsync( string claimant, int worker, string jobType );
 
-		// Extends the lease of a claimed run during long executions. Returns false when the
-		// claim is no longer held by the worker (it expired and may have been reclaimed by a
-		// peer); the worker must then abandon the run without reporting completion.
+		// Extends the lease of a claimed run during long executions, to ClaimedJob.ClaimDuration
+		// from the call. Returns false when the claim is no longer held by the worker (it expired
+		// and may have been reclaimed by a peer); the worker must then abandon the run without
+		// reporting completion.
 		Task<bool> RenewClaimAsync( string run, string claimant, int worker );
 
 		// Releases a claim the worker is giving up on a graceful shutdown, so a peer can adopt the

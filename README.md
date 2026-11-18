@@ -52,6 +52,31 @@ releases its claim (`AbandonClaimAsync`, grant `ABANDON_CLAIM`, bounded by `Work
 default 5 s), so a peer adopts the run at once instead of after the lease; a detached handler's
 claim is left to lapse.
 
+A worker times its claim itself: each claim carries `ClaimDuration` (the coordinator's
+`LeaseDuration`), and the worker treats a claim no renewal confirmed within that duration, less a
+0.5 s tolerance, as lost: it cancels the handler and reports nothing. It claims nothing else until
+the run's report is settled, retrying one that does not get through until the lease runs out. A
+success it could not get recorded is remembered by occurrence (`UnrecordedSuccesses`, shared by the
+host's workers on one coordinator, in memory, 24 h and 1,000 entries at most) and **replayed** when
+the occurrence is claimed again on that host: the outcome is reported, the handler is not run.
+Handlers must still be idempotent on `(Schedule, ScheduledFor)`: a restart or another host runs the
+job again. **The worker never pauses itself**: a coordinator refusal (403) is retried like any other
+failure, since a security provider failing closed during an outage refuses exactly as a missing grant
+does. A refused renewal is retried until the claim's deadline, a refused report until the lease runs
+out, and a refused claim every `WorkerOptions.RefusedPollRetryInterval` (1 min), shown meanwhile as
+`WorkerInfo.Fault` = `CLAIM_REFUSED`. Each case logs an Error naming the grant: alert on them, since a
+grant that really is missing keeps the occurrence claimed (and, for `RENEW_CLAIM`, cuts and repeats
+every run longer than the window, the lease less 0.5 s) until it is granted. After a run whose report was not recorded, the
+worker waits `PollInterval` before claiming again, so it does not adopt its own run straight back.
+
+A single completion report is bounded only by the coordinator's transport and store, so keep their
+timeouts finite (HttpClient's 100 s default, Npgsql's 30 s command timeout, SQLite's busy timeout),
+and allow for one report in flight in the worker host's shutdown budget.
+
+**Upgrading:** upgrade the scheduler (coordinator) hosts before the worker hosts. A coordinator from
+before #35 sends no `ClaimDuration`, which a new worker reads as zero, and it then fails every run it
+claims without executing it.
+
 Run-now (`POST schedules/{identifier}/run`) only raises a request marker; it never moves the next
 occurrence. It is refused with `RunInProgressException` (409) while a run of the schedule is in
 progress, live or lapsed, and a manual run is not retried if it fails.
@@ -74,9 +99,9 @@ services.AddScheduledJobHandler<ReportJobHandler>( "report" );      // executes 
 services.AddJobPayloadValidator<ReportPayloadValidator>( "report" ); // optional, checked at registration
 
 services.AddSchedulingWorkers( new WorkerOptions { Workers = 4 } );   // omit where jobs execute elsewhere
-// WorkerOptions also sets Claimant, JobType, PollInterval, HeartbeatInterval,
-// CancellationGrace (default 10 s), MaxDetachedHandlers (default 2) and
-// AbandonTimeout (default 5 s).
+// WorkerOptions also sets Claimant, JobType, PollInterval, RefusedPollRetryInterval
+// (default 1 min), HeartbeatInterval, CancellationGrace (default 10 s),
+// MaxDetachedHandlers (default 2) and AbandonTimeout (default 5 s).
 ```
 
 The store exposes `GetSchemaUpgradeScripts()`; run them in the order given (schema version, then
@@ -91,7 +116,10 @@ a single host. Several hosts on their own clocks judge each other's leases by th
 `LeaseDuration` must then exceed their clock skew. A registered `TimeProvider` alone does not change
 the facades' clock. On any clock, a forward step (for example an NTP correction on the database
 server) shortens every live lease by the size of the step, so `LeaseDuration` must comfortably exceed
-`HeartbeatInterval` plus any such step.
+a renewal's round trip plus any such step (workers renew at least three times per window, the
+lease less 0.5 s). `LeaseDuration` is at least 10 s (`ExecutionCoordinatorOptions.MinimumLeaseDuration`)
+and must be the same on every coordinator instance over one store: a renewal restarts the full
+duration the worker was handed.
 
 **SQLite host requirements.** Enable WAL journal mode (`PRAGMA journal_mode = WAL`) and a busy
 timeout: units of work run as real transactions (a write begins `IMMEDIATE`), and under WAL readers
@@ -125,6 +153,9 @@ back:
 | 404 | `UnknownScheduleException` / `UnknownRunException` | unknown schedule or run |
 | 409 `RunInProgressResultInfo` | `RunInProgressException` | run-now while a run is active |
 | 409 | `ClaimNotHeldException` | completion by a worker that does not hold the run |
+
+401 stays the transport's `AuthenticationException`; any other failure status (a 503 from a proxy,
+say) surfaces from the clients as `HttpApiRequestException`, never as success.
 
 Endpoints carry their own route prefixes, so map them at the root. Each call takes optional options for
 the API's base path and authorization policies, and returns the endpoints' route group:
@@ -202,7 +233,9 @@ Worker numbers run 1..N across all groups in registration order, and each worker
 as `claimant/number`. `Claimant` defaults to the machine name, so a restarted host presents the
 same holders, re-takes its own claims and adopts its unfinished runs. **Two worker processes on one
 machine must therefore set distinct claimants.** The management endpoints address workers by
-number: `GET workers`, `GET workers/{worker}`, `POST workers/{worker}/pause|resume`.
+number: `GET workers`, `GET workers/{worker}`, `POST workers/{worker}/pause|resume`. `WorkerInfo`
+reports `Paused` (an operator's) and `Fault` (`CLAIM_REFUSED` while the coordinator refuses its
+claims; it clears by itself).
 
 ## Authorization
 

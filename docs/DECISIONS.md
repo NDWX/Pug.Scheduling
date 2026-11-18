@@ -90,6 +90,9 @@ race, and the candidate loop isolates failures (D23). "One job at a time" is "on
 a time": a handler that ignores cancellation is detached and the worker moves on (D25). The
 indexes are the schema-v3 ones (`activeRun is null` partial predicates).
 
+**Amended (#35, D29):** `ClaimedJob` gains `ClaimDuration` (the coordinator's `LeaseDuration`), which
+the worker times its claim by; `ClaimExpiry` stays informational.
+
 ## D6 — Lease claiming is its own abstraction with its own store (user directive) — SUPERSEDED by D23
 
 Historical: the lease provider and the `Pug.Scheduling.Leases*` projects were removed in #10; the
@@ -392,6 +395,11 @@ an in-process one; it sees only whether there is a principal. Any transport a ho
 coordinator to other than `MapExecutionCoordinatorEndpoints` — its own controller, a gRPC service, a
 message consumer — must establish the caller's principal before calling it, or every coordinator
 grant is skipped for its callers. The warning is repeated on `IExecutionCoordinator`.
+
+**Amended (#35, D29):** a refused (`NotAuthorized`) renewal or completion is retried within the lease,
+then the claim is lost or the outcome dropped (a dropped success is remembered and replayed); a
+refused claim slows the worker's polling. The worker never pauses itself. "`SchedulerWorker` already logs and
+swallows a failed completion report" above is history.
 (`Scheduler` is unaffected and still requires a principal — it derives schedule `Owner` and audit
 contexts from it.)
 
@@ -487,6 +495,11 @@ adds detached handlers, `WorkerInfo.DetachedJobs`, and the `CancellationGrace` a
 - Worker log lines that describe the worker (started, stopping, paused, resumed, claim failure,
   no due work) carry `{Claimant}/{Worker}` and the group's `{JobType}` (`any` when unfiltered); job
   lines keep the job's `{JobType}`.
+- **Amended (#35, D29):** `WorkerInfo.Fault` (`WorkerFaults.ClaimRefused`) says the coordinator is
+  currently refusing the worker's claims; it does not imply `Paused` and clears when a claim is
+  answered. `WorkerOptions.RefusedPollRetryInterval` (default 1 min) paces a refused worker's polls.
+  Restart takeover is unchanged; it is the reason the worker must not poll while it still holds a
+  claim.
 
 ## D21 — Lease arbitration runs READ COMMITTED (defect found by the Postgres tests) — SUPERSEDED by D23
 
@@ -645,7 +658,8 @@ row and a separate lease. And no deciding read shared a transaction with its wri
     not change the facades' clock. Several hosts on their own clocks are skew-sensitive again:
     `LeaseDuration` must then exceed their skew.
   - The worker keeps its `TimeProvider`: it measures only local durations and stamps
-    `WorkerInfo.LastPoll`, which is informational.
+    `WorkerInfo.LastPoll`, which is informational. (#35, D29: its lease deadline is measured on the
+    `Stopwatch` from `ClaimedJob.ClaimDuration`, never compared with the coordinator's clock.)
 - Run-now refusal, manual-run rules and the occurrence rules: D10, D11, D12.
 
 ## D24 — SQLite self-enlistment, UnitsOfWork, row locks, shared session base (#10; partly supersedes D22)
@@ -706,6 +720,9 @@ past its timeout, past claim loss, and past shutdown.
   `SchedulerOptions.DefaultTimeout`) with `ArgumentException` (400), and the worker fails a run whose
   claimed timeout is out of range (a remote coordinator is not trusted) rather than letting it stop
   the host. `WorkerOptions` durations are validated likewise (D20).
+- **Amended (#35, D29):** the same guard fails a run whose `ClaimDuration` is below
+  `SchedulerWorker.MinimumClaimDuration` (1 s) or exceeds `TimerBounds.Maximum`; and a renewal still
+  pending is awaited only until the lease deadline, so a hung coordinator no longer delays the detach.
 
 ## D26 — Registering on behalf requires CREATE_ON_BEHALF on the owner principal (#16)
 
@@ -753,6 +770,8 @@ held until the lease lapsed (up to `LeaseDuration`) before a peer could adopt th
   positive, within `TimerBounds.Maximum`), logged at Warning on failure, and never throws out of the
   pump. It adds at most that bound to a stopping worker, so keep `CancellationGrace + AbandonTimeout`
   below the host's shutdown timeout.
+- **Amended (#35, D29):** the shutdown budget must also allow for a completion report in flight. A
+  refusal releases nothing.
 
 ## D28 — Host-configurable base path and authorization policies per API (#28, #29; amends D15)
 
@@ -791,6 +810,146 @@ host may also gate each API with its own authorization policies.
 - **`Pug.Scheduling.WebApi` and `Pug.Scheduling.Worker.WebApi` drop net6.0** (net8.0;net10.0) for
   `MapGroup`; the `NET7_0_OR_GREATER` branches are gone. `Worker.WebApi` now references
   `WebApi.Models` (no ASP.NET dependency) for the defaults.
+
+## D29 — The worker's claim lifecycle (#35)
+
+The worker had no model of a claim's life: it treated "I stopped attending" as "I no longer hold it".
+Every coordinator failure was logged and carried on. A refused renewal (403) kept the handler running
+past its lease, so a peer adopted and ran it concurrently. And after an unreported run the schedule
+row still named the worker as holder, so its next poll — at once — adopted the same run (D20), and a
+refused or failing completion re-executed it in a tight loop that never used up an attempt.
+
+- **Failure classification**, documented on `IExecutionCoordinator` and applied in the worker's catch
+  clauses (no shared helper: the worker is its only consumer):
+  - *refused*: `NotAuthorized` (403). It concerns the caller, not the run: a missing grant, or a
+    security provider failing closed while its backend is down — the two read the same;
+  - *not held*: `false`, `ClaimNotHeldException`, `UnknownRunException`;
+  - *unconfirmed*: everything else — 401 `AuthenticationException` (a token may refresh), 5xx,
+    network, timeouts, and `ArgumentException`/`InvalidOperationException` (one schedule's bad stored
+    data must not pause every worker).
+  The Worker project references `Pug.Application.Security.Abstractions` for `NotAuthorized`.
+- **The worker knows its lease.** `ClaimedJob.ClaimDuration` is the coordinator's `LeaseDuration`, on
+  claim and on adoption. The coordinator requires `LeaseDuration` of at least
+  `ExecutionCoordinatorOptions.MinimumLeaseDuration` (10 s, user decision) and at most
+  `TimerBounds.Maximum`. The worker's deadline is a `Stopwatch` timestamp taken *before* the
+  request + its *window*, `ClaimDuration` − `SchedulerWorker.LeaseTolerance` (500 ms), advanced only
+  by a renewal that answers true (from that renewal's own pre-request timestamp). Skew and round trip
+  can only move it earlier than the coordinator's. A renewal restarts the full `ClaimDuration`, so
+  **every coordinator instance on one store must share one `LeaseDuration`**.
+- **The worker's own guard.** A `ClaimDuration` below `SchedulerWorker.MinimumClaimDuration` (twice the
+  tolerance, 1 s) or beyond `TimerBounds.Maximum` fails the run unexecuted (D25's guard): a remote
+  coordinator of another version is not trusted.
+- **Upgrade order: the scheduler (coordinator) hosts before the worker hosts.** An older coordinator
+  sends no `ClaimDuration`, which reads as zero, and a new worker fails every run it claims unexecuted.
+- **Renewal.** `beat = Min( HeartbeatInterval, window / 3 )` (user decision): even a `HeartbeatInterval`
+  at or above the lease leaves a renewal and a genuine retry within each window. The claim is lost
+  (`LoseClaim( NotHeld | Lapsed )`, handler cancelled, nothing reported) on false, or at the deadline. When the remaining window is no longer than a beat, the worker waits
+  the whole remainder and lapses after it without re-reading the deadline, and a renewal still
+  pending when its wait (the remaining window) times out is the lapse itself. Timers work in whole
+  milliseconds and may fire a little before the `Stopwatch` deadline; re-reading a tiny-positive
+  remainder made the heartbeat spin renewals at the deadline (found in review, 4/20 runs), each of
+  which could still land and extend the lease of a run already given up. Other failures, refusals
+  included, are logged and retried at the next beat.
+- **Completion.** Recorded → done. Not held → Warning, outcome dropped. Anything else, a refusal
+  included → retried every `PollInterval` until the lease deadline: past it a peer may adopt the run
+  and refuse the report (until then a lapsed holder's report is still accepted, D23). `TIMED_OUT` reports get the same window. (Round
+  2 also ended the window at the run's timeout, "since past it the job counts as failed"; that premise
+  was false — the coordinator never compares a run with its `Timeout`, it only copies it into
+  `ClaimedJob` — so a job finishing near its timeout lost its retries, and was removed in round 3.)
+  The last wait is the whole remainder followed by one final attempt (the heartbeat's shape); the
+  first attempt is made even past the deadline (a lapsed holder's report is accepted until a peer
+  adopts, D23). The report of a claim the worker could not time gets that one attempt only. Then
+  Error (naming `REPORT_COMPLETION` when refused) and dropped; nothing is released.
+- **Unrecorded successes are replayed, not re-run** (user decision, round 3). A dropped report means
+  the run is re-adopted and executed again at the same attempt; for a success that repeats side
+  effects for nothing. So the worker remembers every SUCCEEDED outcome it could not get recorded —
+  dropped at the lease deadline, answered "not held", or completed after its claim was lost — in a
+  `UnrecordedSuccesses` store keyed by occurrence `(Schedule, ScheduledFor)` (the domain's idempotency
+  key; normalized to UTC whole microseconds, since Postgres stores microseconds while a first claim
+  may carry 100 ns ticks). When the occurrence is claimed again, under any run, the worker skips the
+  handler (and the heartbeat) and reports the remembered outcome through the usual `ReportAsync`,
+  under the new claim and lease. The entry is removed only once recorded: on "not held" a peer owns
+  the run, but if it fails, its retry is the same occurrence and may come back here. An entry whose
+  `JobType` or `Payload` changed since is dropped and the job runs (Warning). Failures and
+  `TIMED_OUT` are never remembered (running them again is what a retry is for), nor is a detached
+  handler's late result. A replay re-sends the original outcome, `Details` included: it is the true
+  result of the work done. Remember and forget happen in one place, after the report; a success
+  reached after the claim was lost comes back from classification marked `ClaimLost` (never
+  reported) and goes through the same block.
+  - *Bounds:* `Retention` 24 h from the first remember (on the `TimeProvider`'s timestamp) and
+    `Capacity` 1,000, oldest evicted first, both enforced on every call. An occurrence comes back only
+    while its run is active; past the bounds, handler idempotency is the backstop, as it always is.
+  - *Scope and limits:* in memory, per host, per coordinator instance. `AddSchedulingWorkers` gives
+    every group on one coordinator instance (compared by reference) one shared store, so any worker
+    of the host replays; a group with its own coordinator factory gets its own, since another
+    scheduler's schedule identifiers could collide. A restart, or adoption by another host,
+    re-executes: handlers must stay idempotent on `(Schedule, ScheduledFor)`.
+- **A single report attempt has no worker-side limit** (user decision): the coordinator's transport and
+  store must keep finite timeouts (HttpClient 100 s by default, Npgsql's command timeout 30 s, SQLite's
+  busy timeout), and a host's shutdown budget must allow for one attempt in flight. Documented on
+  `IExecutionCoordinator`.
+- **A host stop during report retries drops the outcome without releasing the claim**: the coordinator
+  was not answering, so a release would most likely fail too, and the shutdown would wait out
+  `AbandonTimeout` for nothing; the claim lapses with its lease.
+- **The pump waits after an unrecorded run** (user decision). After a run whose report was not
+  recorded — abandoned, not held, dropped (refused or unconfirmed), or failed for an unusable claim — the
+  pump waits `PollInterval` before claiming again, cut short by a state change or the host stopping,
+  as after a poll that found nothing. The row may still name this worker as holder, and an immediate
+  claim would adopt the same run (D20). Together with the retries above, a run whose reports do not
+  get through is claimed again at most once per lease plus `PollInterval` (the pump does not claim
+  while retrying), or once per `PollInterval` when a report fails at once (an unusable claim, a proxy
+  404 read as an unknown run). A success is then replayed, not executed again; a failure or timeout
+  is executed again. After a recorded report the pump polls again at once.
+- **Refusals are retried; the worker never pauses itself** (user decision, revising a first design in
+  which a refused renewal or completion released the claim and paused the worker with a fault until
+  an operator resumed it). The coordinator's check is `ISecurityManager.CurrentPrincipal
+  .IsAuthorizedAsync(…)`, and a fail-closed security provider answers "not authorized" while its
+  backend is down: a blip would have parked every worker until each was resumed by hand. So:
+  - *renewal*: a refusal is unconfirmed — a Warning naming `RENEW_CLAIM`, retried at the beat; at the
+    deadline the claim is lost as `Lapsed`, with an Error naming the grant;
+  - *completion*: unconfirmed, within the window above; dropped with an Error naming
+    `REPORT_COMPLETION`;
+  - *claim*: nothing is held or executed, so the worker keeps polling, but at
+    `WorkerOptions.RefusedPollRetryInterval` (default 1 min; positive, within `TimerBounds.Maximum`;
+    no opt-out to stay idle — an operator who wants that uses `Pause()`) instead of `PollInterval`,
+    sparing the coordinator and its security backend. Pause/resume or the host stopping cut the wait
+    short. `WorkerInfo.Fault` is `WorkerFaults.ClaimRefused` from the first refusal until a claim is
+    answered (with a job or none); one Error per episode, Information on recovery. `Fault` does not
+    imply `Paused`, and `Resume()` does not clear it.
+- **The cost of a grant that really is missing**, now that nothing stops the worker:
+  - without `REPORT_COMPLETION`: each job runs once; its success is remembered, and every later claim
+    of the occurrence on this host replays it (a failure is executed again, as any retry would be).
+    The occurrence stays claimed — re-adopted once per lease plus `PollInterval` — until granted, and
+    the stuck run holds back the schedule's later occurrences meanwhile; once it is recorded, misfire
+    handling applies to what elapsed;
+  - without `RENEW_CLAIM`: every run longer than the window (`ClaimDuration` − 0.5 s) is cut at the
+    deadline and repeated, once per lease plus `PollInterval`, side effects repeated each time. Replay
+    does not apply: the handler never finished.
+  Operators must alert on the Errors above; the worker recovers by itself once granted.
+- **`WorkerInfo.Fault` reflects the last claim that was answered or refused**, dated by `LastPoll`. It
+  is not re-evaluated while the worker does not poll, so it may stay `CLAIM_REFUSED` while the worker
+  is paused or at its detached limit.
+- **Release rule.** An abandoned run whose handler stopped is released only when the host is stopping
+  and the claim was not lost. A detached handler is never released (D27); a lapsed or not-held claim
+  has nothing to release; a refusal releases nothing.
+- **Coordinator adoption is unchanged.** The row cannot tell a restarted holder from a running one;
+  only the worker knows, so the fix is the worker's (D9, D20 kept).
+- **Client: every failure status throws.** Pug.HttpApiClient 0.6.0's `EnsureSuccessResponse` throws
+  only for the statuses it lists and returns the rest (503, 504, 429, 408) as responses, so a 503 on
+  completion read as recorded. `ApiFailures.EnsureSuccess` throws `HttpApiRequestException( response )`
+  for every raw-response call of both clients (the typed helpers already check). Fixing the default
+  upstream is a separate Pug.HttpApiClient issue.
+- **Residual risks (accepted):**
+  - the `Stopwatch` does not count a whole-system suspend (a VM paused): the worker then overestimates
+    its lease until the next answered renewal;
+  - a claim lost (lapsed) just as the handler completes is never reported: a success is remembered
+    and replayed on this host, a failure is lost and the occurrence runs again;
+  - the handler starts without checking whether the claim already lapsed during a slow claim round
+    trip; the heartbeat then lapses it at once;
+  - a renewal that blocks synchronously, before returning its task, is not bounded by `WaitAsync`.
+- **Follow-up (not fixed here): poison completion.** A completion that throws for the schedule's own
+  data (a stored zero interval, #33) is *unconfirmed*, so the run is re-executed once per lease,
+  forever; the coordinator should complete the run and park the schedule, or cap deliveries per run.
 
 ## Verification conventions
 
@@ -831,6 +990,11 @@ Docker run `--filter "Category!=Postgres"`. The HTTP/API suites stay on SQLite.
   (`AbandonClaimAsync`: graceful shutdown releases the lease; **DONE**, D27), **#12** (database-clock lease expiry: `ISchedulingClock`, `DatabaseClock` by default; **DONE**, D23),
   **#13** (shared SQLite enlistment package), **#14** (`for update skip locked` on Postgres claims;
   **implemented**, D23 amendment, awaiting review).
+- **Worker claim lifecycle (#35)** — `ClaimedJob.ClaimDuration`, the worker's own lease deadline,
+  failure classification, refusals retried (never a self-pause; `CLAIM_REFUSED` and
+  `RefusedPollRetryInterval` for refused claims), a report window bounded by the lease alone,
+  unrecorded successes replayed (`UnrecordedSuccesses`), and clients throwing on every failure status
+  (D29) — **implemented, awaiting review**.
 - **Phase 1 COMPLETE.** Carry-over: webhook dispatch (D14, superseded by D19: a webhook is now a
   handler) still deferred.
 - **Phase 2** `Pug.ReportConfigurations` (sub-phases 2a–2e, same shape as this repo).

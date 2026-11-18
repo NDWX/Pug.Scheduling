@@ -187,6 +187,32 @@ public class SchedulerWorkerEndpointsTests : IClassFixture<SchedulingApiFixture>
 	}
 
 	[Fact]
+	public async Task AFaultIsReportedWithoutAPause()
+	{
+		const string viewer = "fault-viewer";
+
+		Grant( viewer, WorkerSecurityOperations.GetInfo, SchedulingApiFixture.WorkerClaimant );
+
+		using HttpClient client = _fixture.CreateClient( viewer );
+
+		_fixture.Worker.SetFault( WorkerFaults.ClaimRefused );
+
+		try
+		{
+			WorkerInfo faulted = await SchedulingApiFixture.ReadAsync<WorkerInfo>( await client.GetAsync( "/workers/1" ) );
+
+			Assert.Equal( WorkerFaults.ClaimRefused, faulted.Fault );
+			Assert.False( faulted.Paused );
+		}
+		finally
+		{
+			_fixture.Worker.SetFault( null );
+		}
+
+		Assert.Null( ( await SchedulingApiFixture.ReadAsync<WorkerInfo>( await client.GetAsync( "/workers/1" ) ) ).Fault );
+	}
+
+	[Fact]
 	public async Task PausingOneWorkerLeavesTheOtherRunning()
 	{
 		const string operatorUser = "group-operator";
