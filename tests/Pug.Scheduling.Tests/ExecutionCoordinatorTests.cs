@@ -1223,6 +1223,30 @@ public abstract class ExecutionCoordinatorTests<TScheduleDatabase>
 		Assert.Equal( nextRun, ( await GetScheduleAsync( schedule ) ).State.NextRun );
 	}
 
+	// A manual run's occurrence is the clock's now. With a clock finer than the store (this one
+	// gets 100 ns ticks; Postgres keeps microseconds), the first claim must still hand out the same
+	// ScheduledFor as an adoption of the run, which reads it back from the store: handlers key their
+	// side effects on it. SQLite round-trips all 7 digits, so there it holds either way.
+	[Fact]
+	public async Task AManualRunHandsOutTheSameOccurrenceOnItsFirstClaimAndOnAdoption()
+	{
+		string schedule = await InsertScheduleAsync( Now.AddHours( 1 ) );
+
+		_clock.Advance( TimeSpan.FromTicks( 7 ) );
+
+		await _scheduler.RunNowAsync( schedule );
+
+		ClaimedJob first = await ClaimSingleAsync( schedule, worker: 1 );
+
+		LapseClaims();
+
+		ClaimedJob adopted = await ClaimSingleAsync( schedule, worker: 2 );
+
+		Assert.Equal( first.Context.Run, adopted.Context.Run );
+		Assert.Equal( adopted.Context.ScheduledFor, first.Context.ScheduledFor );
+		Assert.Equal( Assert.Single( await GetRunsAsync( schedule ) ).ScheduledFor, first.Context.ScheduledFor );
+	}
+
 	// F1: a run-now while a run executes is refused, so it cannot move the occurrence; a crash of
 	// that run then leads to its adoption, never to its occurrence being recorded again.
 	[Fact]
