@@ -309,13 +309,21 @@ namespace Pug.Scheduling
 			if( action == OccurrenceAction.Manual )
 				await session.SetRunRequestedAsync( schedule.Identifier, false ).ConfigureAwait( false );
 
+			// Hand out the run as stored, not as composed: handlers key their side effects on
+			// (Schedule, ScheduledFor), and an adoption of this run hands out the stored value. A
+			// manual run's occurrence is the clock's now, which a store may keep at a coarser
+			// precision (Postgres: microseconds), so the composed value could differ from the one an
+			// adopter later sees (#45).
+			ScheduleRun stored = await session.GetRunAsync( run.Identifier ).ConfigureAwait( false ) ??
+								throw new InvalidOperationException( $"Run {run.Identifier} was not stored." );
+
 			_logger.LogInformation(
 					"Claimant {Claimant} worker {Worker} claimed run {Run} of schedule {Schedule} " +
 					"(occurrence {ScheduledFor}, attempt {Attempt}, trigger {Trigger}).",
-					caller.Claimant, caller.Worker, run.Identifier, schedule.Identifier, run.ScheduledFor, run.Attempt,
-					run.Trigger );
+					caller.Claimant, caller.Worker, stored.Identifier, schedule.Identifier, stored.ScheduledFor,
+					stored.Attempt, stored.Trigger );
 
-			return ToClaimedJob( schedule, run, lease );
+			return ToClaimedJob( schedule, stored, lease );
 		}
 
 		// Takes over the schedule's active run (a lapsed claim, or the caller's own after a

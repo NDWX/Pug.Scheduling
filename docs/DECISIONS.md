@@ -147,6 +147,11 @@ only while `attempt > 0`), so no claim infers it from the latest run row and `Ge
 gone. Adoption is decided on the locked row (`OccurrenceState.Classify`: adopt precedes every other
 rule), not by matching `(scheduledFor, attempt)` against a run read.
 
+**Amended (#45):** a claim hands out the run as stored, not as composed. `StartRunAsync` reads the run
+back after inserting it, as `AdoptRunAsync` does, so the first claim and any adoption hand out the
+same `ScheduledFor`. A manual run's occurrence is the clock's now, and a store may keep it at a coarser
+precision (Postgres: microseconds) than a host clock produces (100 ns ticks).
+
 ## D10 — MANUAL trigger is first-class (user directive)
 
 `ScheduleState.RunRequested` (+ `runRequested` column): raised by run-now via `RequestRunAsync`,
