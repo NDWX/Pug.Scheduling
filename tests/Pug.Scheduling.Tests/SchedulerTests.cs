@@ -423,6 +423,19 @@ public abstract class SchedulerTests<TScheduleDatabase>
 	}
 
 	[Fact]
+	public async Task AWindowsTimeZoneIsRejectedAtRegistrationAndUpdate()
+	{
+		Recurrence windows = new() { CronExpression = "0 7 * * MON", TimeZone = "AUS Eastern Standard Time" };
+
+		await Assert.ThrowsAsync<ArgumentException>( () => _scheduler.RegisterAsync( NewDefinition( recurrence: windows ) ) );
+
+		string identifier = await _scheduler.RegisterAsync( NewDefinition() );
+
+		await Assert.ThrowsAsync<ArgumentException>(
+				() => _scheduler.UpdateDefinitionAsync( identifier, NewDefinition( recurrence: windows ) ) );
+	}
+
+	[Fact]
 	public async Task ZeroIntervalIsRejected()
 	{
 		await Assert.ThrowsAsync<ArgumentException>(

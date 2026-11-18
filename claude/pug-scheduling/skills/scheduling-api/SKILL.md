@@ -89,7 +89,7 @@ Exactly one of `CronExpression` and `Interval` must be set:
 
 - **Cron:** standard five-field Cronos syntax (minute, hour, day of month, month, day of week), with no seconds field. It is evaluated in `TimeZone`, so occurrences follow local time across DST. A local time skipped by DST fires at the jump, and an ambiguous one fires once.
 - **Interval:** a positive `TimeSpan` (in practice, at least 1 s). Occurrences stay on a fixed grid (`anchor + k × Interval`) and never drift with late completions.
-- **`TimeZone`** is required for both modes. It is an IANA identifier such as `Australia/Melbourne`, resolved by the scheduler host's time-zone database. An unknown one is an `ArgumentException`.
+- **`TimeZone`** is required for both modes. It is an IANA identifier such as `Australia/Melbourne`, resolved by the scheduler host's time-zone database. An unknown one, or a Windows ID such as `AUS Eastern Standard Time`, is an `ArgumentException` (400).
 - **`NotBefore` / `NotAfter`** are an optional window, UTC, inclusive at both ends. `NotBefore` must be strictly before `NotAfter`. Pass `DateTimeKind.Utc` values: the calculator treats any `DateTime` as UTC without converting it.
 
 The first `NextRun` (at registration, or when an idle schedule's recurrence changes):

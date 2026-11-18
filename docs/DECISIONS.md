@@ -221,6 +221,14 @@ handler too little time once worker overheads (handler creation, claim round tri
 are counted. The floor is fixed, not host-configurable. It applies when a definition is registered or
 updated; stored schedules are not rewritten.
 
+**Amended (#47):** `Recurrence.TimeZone` must be an IANA identifier; `RecurrenceCalculator.Validate`
+refuses a zone whose `TimeZoneInfo` is not IANA (`HasIanaId`), so a Windows ID is a 400 at
+registration and update. The zone is resolved again at every completion, on the coordinator's host,
+and IANA IDs are what every platform's tz database knows natively; a Windows ID resolves on Linux only
+through ICU's conversion. Hosts need ICU and an up-to-date tz database (Linux: `libicu`, `tzdata`, no
+`InvariantGlobalization`); one that cannot resolve a schedule's zone fails every completion of it.
+This closes the last validated-data path of #43's failing-completion loop.
+
 ## D13 — Job types: schedulable vs executable
 
 `IJobTypeRegistry` (Abstractions) separates what is *schedulable* at the API host from what is
