@@ -416,4 +416,32 @@ public class SchedulingEndpointsTests : IClassFixture<SchedulingApiFixture>
 		Assert.Equal( HttpStatusCode.OK, ( await client.DeleteAsync( $"/schedules/{identifier}" ) ).StatusCode );
 		Assert.Equal( HttpStatusCode.NotFound, ( await client.GetAsync( $"/schedules/{identifier}" ) ).StatusCode );
 	}
+
+	// A whitespace identifier is a bad request on every route that takes one, not a fault: the
+	// shared translation of the facade's ArgumentException is the net for any route a pre-check misses.
+	[Theory]
+	[InlineData( "GET", "" )]
+	[InlineData( "GET", "/runs" )]
+	[InlineData( "POST", "/pause" )]
+	[InlineData( "POST", "/resume" )]
+	[InlineData( "POST", "/run" )]
+	[InlineData( "PUT", "" )]
+	[InlineData( "DELETE", "" )]
+	public async Task BlankIdentifierIsRejectedAsBadRequest( string method, string suffix )
+	{
+		using HttpClient client = _fixture.CreateClient( Owner );
+
+		using HttpRequestMessage request = new( new HttpMethod( method ), $"/schedules/%20{suffix}" );
+
+		if( method == "PUT" )
+			request.Content = SchedulingApiFixture.JsonContent( NewDefinition() );
+
+		HttpResponseMessage response = await client.SendAsync( request );
+
+		Assert.Equal( HttpStatusCode.BadRequest, response.StatusCode );
+
+		BadRequestResultInfo error = await SchedulingApiFixture.ReadAsync<BadRequestResultInfo>( response );
+
+		Assert.False( string.IsNullOrEmpty( error.Type ) );
+	}
 }

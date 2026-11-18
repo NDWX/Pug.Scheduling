@@ -396,4 +396,19 @@ public class ExecutionCoordinatorEndpointsTests : IClassFixture<SchedulingApiFix
 
 		Assert.Equal( HttpStatusCode.Forbidden, response.StatusCode );
 	}
+
+	[Fact]
+	public async Task BlankRunIsRejectedAsBadRequest()
+	{
+		using HttpClient client = _fixture.CreateClient( Worker );
+
+		HttpResponseMessage response = await client.PostAsync(
+				$"/executionCoordinator/JobRuns/%20/leaseRenewal?claimant={Worker}&worker={_worker}", null );
+
+		Assert.Equal( HttpStatusCode.BadRequest, response.StatusCode );
+
+		BadRequestResultInfo error = await SchedulingApiFixture.ReadAsync<BadRequestResultInfo>( response );
+
+		Assert.Equal( "INVALID_ARGUMENT", error.Type );
+	}
 }

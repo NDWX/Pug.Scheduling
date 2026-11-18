@@ -91,16 +91,6 @@ public static class ExecutionCoordinatorEndpoints
 		return group;
 	}
 
-	private static IResult InvalidArgument( ArgumentException exception ) =>
-		Results.BadRequest(
-				new BadRequestResultInfo
-				{
-					Type = "INVALID_ARGUMENT",
-					RequestArgument = exception.ParamName ?? string.Empty,
-					Message = exception.Message
-				}
-			);
-
 	// The worker number arrives as a query string; it is parsed here rather than bound as int so
 	// that an omitted or malformed value reaches the caller as a structured BadRequestResultInfo
 	// instead of model binding failing with an empty 400 body.
@@ -133,24 +123,18 @@ public static class ExecutionCoordinatorEndpoints
 			return Results.BadRequest(
 					new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(request.Claimant) ) );
 
-		try
-		{
-			ClaimedJob? claimed =
-				await coordinator.ClaimDueJobAsync(
-									request.Claimant, request.Worker,
-									string.IsNullOrEmpty( request.JobType ) ? null : request.JobType )
-								.ConfigureAwait( false );
+		return await FacadeFailures.TranslateAsync(
+								async () =>
+								{
+									ClaimedJob? claimed =
+										await coordinator.ClaimDueJobAsync(
+															request.Claimant, request.Worker,
+															string.IsNullOrEmpty( request.JobType ) ? null : request.JobType )
+														.ConfigureAwait( false );
 
-			return claimed is null ? Results.NoContent() : Results.Ok( claimed );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+									return claimed is null ? Results.NoContent() : Results.Ok( claimed );
+								}
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> RenewClaim(
@@ -164,19 +148,10 @@ public static class ExecutionCoordinatorEndpoints
 		if( invalid is not null )
 			return invalid;
 
-		try
-		{
-			return Results.Ok(
-					await coordinator.RenewClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+		return await FacadeFailures.TranslateAsync(
+								async () => Results.Ok(
+										await coordinator.RenewClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) )
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> AbandonClaim(
@@ -190,19 +165,10 @@ public static class ExecutionCoordinatorEndpoints
 		if( invalid is not null )
 			return invalid;
 
-		try
-		{
-			return Results.Ok(
-					await coordinator.AbandonClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) );
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+		return await FacadeFailures.TranslateAsync(
+								async () => Results.Ok(
+										await coordinator.AbandonClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) )
+							).ConfigureAwait( false );
 	}
 
 	private static async Task<IResult> ReportCompletion(
@@ -220,32 +186,15 @@ public static class ExecutionCoordinatorEndpoints
 		if( completion is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(completion) ) );
 
-		try
-		{
-			await coordinator.ReportCompletionAsync(
-								run, claimant!, workerNumber, completion.Result, completion.Outcome )
-							.ConfigureAwait( false );
+		return await FacadeFailures.TranslateAsync(
+								async () =>
+								{
+									await coordinator.ReportCompletionAsync(
+														run, claimant!, workerNumber, completion.Result, completion.Outcome )
+													.ConfigureAwait( false );
 
-			return Results.Ok();
-		}
-		catch( NotAuthorized )
-		{
-			return Results.Forbid();
-		}
-		catch( UnknownRunException )
-		{
-			// Includes runs whose schedule was deleted mid-flight — history goes with the schedule.
-			return Results.NotFound();
-		}
-		catch( ClaimNotHeldException )
-		{
-			// The reporter cannot be verified to hold the run: adopted by a peer, never claimed
-			// by it, or already finished. Nothing was written.
-			return Results.Conflict();
-		}
-		catch( ArgumentException e )
-		{
-			return InvalidArgument( e );
-		}
+									return Results.Ok();
+								}
+							).ConfigureAwait( false );
 	}
 }
