@@ -209,6 +209,19 @@ public class RecurrenceCalculatorTests
 	}
 
 	[Fact]
+	public void ATimeZoneMustBeAnIanaIdentifier()
+	{
+		// A Windows ID: on a host with ICU it resolves (converted) but is not IANA; without ICU it
+		// does not resolve at all. Refused either way.
+		Assert.Throws<ArgumentException>(
+				() => RecurrenceCalculator.Validate(
+						new Recurrence { Interval = TimeSpan.FromHours( 1 ), TimeZone = "AUS Eastern Standard Time" } ) );
+
+		RecurrenceCalculator.Validate(
+				new Recurrence { CronExpression = "0 7 * * MON", TimeZone = "Australia/Melbourne" } );
+	}
+
+	[Fact]
 	public void InvalidRecurrenceDetailsAreRejected()
 	{
 		Assert.Throws<ArgumentException>(

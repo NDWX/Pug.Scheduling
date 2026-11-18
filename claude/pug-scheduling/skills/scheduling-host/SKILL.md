@@ -245,6 +245,7 @@ These combine: several scheduler or coordinator hosts on one Postgres store are 
 
 ## Pitfalls
 
+- **Every scheduler or coordinator host needs ICU and an up-to-date IANA tz database** (Linux containers: `libicu` and `tzdata`, no `InvariantGlobalization`). Completion re-resolves the schedule's time zone on the coordinator's host, and a host that cannot resolve it fails every completion of that schedule: the run never records. Time zones must be IANA IDs; Windows IDs are refused at registration.
 - **Scheduling a type that is not schedulable here.** Registration answers 400 "Job type '…' is not registered". Handler registration doesn't count, so add `AddSchedulableJobType` in every host that accepts schedules for the type.
 - **Migrating without `RunGroupOrder`.** DbUp then applies scripts in name order, which is not guaranteed to be script order. Apply `GetSchemaUpgradeScripts()` in the order given, and use a journal of the store's own when the database is shared.
 - **SQLite shared by several hosts.** Each host's clock judges the others' leases, and they contend for one write lock. Use Postgres.

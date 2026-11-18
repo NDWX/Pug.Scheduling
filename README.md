@@ -121,6 +121,13 @@ lease less 0.5 s). `LeaseDuration` is at least 10 s (`ExecutionCoordinatorOption
 and must be the same on every coordinator instance over one store: a renewal restarts the full
 duration the worker was handed.
 
+**Time zones.** `Recurrence.TimeZone` must be an IANA identifier (`Australia/Melbourne`); a Windows ID
+(`AUS Eastern Standard Time`) is refused at registration and update with `ArgumentException` (400).
+The zone is looked up again at every completion, on the coordinator's host, so every host running the
+`Scheduler` or the coordinator needs ICU and an up-to-date IANA time-zone database: on Linux
+containers install `libicu` and `tzdata`, and do not enable `InvariantGlobalization`. A host that
+cannot resolve a schedule's zone fails every completion of it.
+
 **SQLite host requirements.** Enable WAL journal mode (`PRAGMA journal_mode = WAL`) and a busy
 timeout: units of work run as real transactions (a write begins `IMMEDIATE`), and under WAL readers
 do not block the writer. Set the busy timeout in the connection string with Microsoft.Data.Sqlite's

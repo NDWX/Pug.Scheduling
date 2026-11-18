@@ -34,15 +34,26 @@ namespace Pug.Scheduling
 			if( string.IsNullOrWhiteSpace( recurrence.TimeZone ) )
 				throw new ArgumentException( "Recurrence time zone is required.", nameof(recurrence) );
 
+			TimeZoneInfo timeZone;
+
 			try
 			{
-				TimeZoneInfo.FindSystemTimeZoneById( recurrence.TimeZone );
+				timeZone = TimeZoneInfo.FindSystemTimeZoneById( recurrence.TimeZone );
 			}
 			catch( Exception exception ) when( exception is TimeZoneNotFoundException or InvalidTimeZoneException )
 			{
 				throw new ArgumentException(
 						$"Unknown or invalid time zone '{recurrence.TimeZone}'.", nameof(recurrence), exception );
 			}
+
+			// IANA only. The zone is looked up again at every completion, possibly on another host
+			// (the coordinator's), and every platform's tz database knows IANA IDs natively. A
+			// Windows ID resolves on Linux only through ICU's conversion, so a schedule stored with
+			// one would fail every completion on a host without ICU (#47).
+			if( !timeZone.HasIanaId )
+				throw new ArgumentException(
+						$"Time zone '{recurrence.TimeZone}' is not an IANA identifier; use the IANA form " +
+						"(e.g. 'Australia/Melbourne').", nameof(recurrence) );
 
 			if( hasCron )
 			{
