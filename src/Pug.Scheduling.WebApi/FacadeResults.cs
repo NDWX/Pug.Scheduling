@@ -16,7 +16,7 @@ namespace Pug.Scheduling.WebApi;
 /// (per-handler copies had drifted, answering 500 where the contract says 400). It wraps the
 /// facade call alone, not the whole handler, so only an exception the facade threw is translated.
 /// </summary>
-internal static class FacadeFailures
+internal static class FacadeResults
 {
 	internal static async Task<IResult> TranslateAsync( Func<Task<IResult>> call )
 	{

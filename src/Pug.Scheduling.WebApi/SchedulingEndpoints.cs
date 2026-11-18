@@ -189,7 +189,7 @@ public static class SchedulingEndpoints
 		if( !TryGetOwner( ownerType, ownerIdentifier, out Reference? owner, out BadRequestResultInfo? error ) )
 			return Results.BadRequest( error );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () => Results.Ok(
 										await scheduler.GetSchedulesAsync( domain, owner, jobType ).ConfigureAwait( false ) )
 							).ConfigureAwait( false );
@@ -202,7 +202,7 @@ public static class SchedulingEndpoints
 		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () => Results.Ok(
 										await scheduler.GetScheduleAsync( identifier ).ConfigureAwait( false ) )
 							).ConfigureAwait( false );
@@ -217,7 +217,7 @@ public static class SchedulingEndpoints
 		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () => Results.Ok(
 										await scheduler.GetRunsAsync( identifier, from, to ).ConfigureAwait( false ) )
 							).ConfigureAwait( false );
@@ -235,7 +235,7 @@ public static class SchedulingEndpoints
 		if( !TryGetOwner( ownerType, ownerIdentifier, out Reference? owner, out BadRequestResultInfo? error ) )
 			return Results.BadRequest( error );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									// Owner defaults to the calling principal when unspecified; registering on behalf of
@@ -258,7 +258,7 @@ public static class SchedulingEndpoints
 		if( definition is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(definition) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									await scheduler.UpdateDefinitionAsync( identifier, definition ).ConfigureAwait( false );
@@ -275,7 +275,7 @@ public static class SchedulingEndpoints
 		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									await scheduler.DeleteAsync( identifier ).ConfigureAwait( false );
@@ -300,7 +300,7 @@ public static class SchedulingEndpoints
 		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									if( paused )
@@ -320,7 +320,7 @@ public static class SchedulingEndpoints
 		if( string.IsNullOrWhiteSpace( identifier ) )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(identifier) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									await scheduler.RunNowAsync( identifier ).ConfigureAwait( false );

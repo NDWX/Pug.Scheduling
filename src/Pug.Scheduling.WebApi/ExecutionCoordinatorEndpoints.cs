@@ -123,7 +123,7 @@ public static class ExecutionCoordinatorEndpoints
 			return Results.BadRequest(
 					new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(request.Claimant) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									ClaimedJob? claimed =
@@ -148,7 +148,7 @@ public static class ExecutionCoordinatorEndpoints
 		if( invalid is not null )
 			return invalid;
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () => Results.Ok(
 										await coordinator.RenewClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) )
 							).ConfigureAwait( false );
@@ -165,7 +165,7 @@ public static class ExecutionCoordinatorEndpoints
 		if( invalid is not null )
 			return invalid;
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () => Results.Ok(
 										await coordinator.AbandonClaimAsync( run, claimant!, workerNumber ).ConfigureAwait( false ) )
 							).ConfigureAwait( false );
@@ -186,7 +186,7 @@ public static class ExecutionCoordinatorEndpoints
 		if( completion is null )
 			return Results.BadRequest( new BadRequestResultInfo( "MISSING_ARGUMENT", nameof(completion) ) );
 
-		return await FacadeFailures.TranslateAsync(
+		return await FacadeResults.TranslateAsync(
 								async () =>
 								{
 									await coordinator.ReportCompletionAsync(
